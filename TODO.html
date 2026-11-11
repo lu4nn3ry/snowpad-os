@@ -327,6 +327,7 @@
         .tag-ios { background: #a855f722; color: #c084fc; border: 1px solid #a855f744; }
         .tag-gpu { background: #10b98122; color: #34d399; border: 1px solid #10b98144; }
         .tag-shim { background: #f59e0b22; color: #fbbf24; border: 1px solid #f59e0b44; }
+        .tag-wip { background: #f59e0b18; color: #fbbf24; border: 1px dashed #f59e0b66; }
 
         .task-desc {
             font-size: 0.92rem;
@@ -420,7 +421,7 @@
                                 <span class="task-tag tag-xnu">XNU Kernel</span>
                             </div>
                             <div class="task-desc">Aplicar patch no cpuid.c do XNU para reconhecer o Family 6, Model 28 (Pineview N450) como processador suportado sem disparar Kernel Panic de CPU não suportada.</div>
-                            <div class="task-tech">Arquivo: osfmk/i386/cpuid.c (CPUFAMILY_INTEL_ATOM / CPU_MODEL_ATOM)</div>
+                            <div class="task-tech">Arquivo: osfmk/i386/cpuid.c (CPUFAMILY_INTEL_ATOM / CPU_MODEL_ATOM) → implementado em src/kernel/cpuid.c ✔</div>
                         </div>
                     </div>
                     <div class="task-item" data-id="p1-t2">

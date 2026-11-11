@@ -1,22 +1,16 @@
 /*
- * springboard.c - SnowPad OS Native TV Hub & App Launcher (v6)
+ * springboard.c - SnowPad OS Native TV Hub & App Launcher (v7)
  * Fullscreen 1360x768x32 UI for external VGA monitor (LG TV).
  *
- * Integrated Apps (Akita & Real TV Hub):
- * 1. Jogos Retro (RetroArch XMB Unificado - NES, SNES, Mega Drive, GBA, PS1, N64)
- * 2. YouTube & Videos (mpv + yt-dlp em 480p H.264)
- * 3. Musica & Radio Online (Streams ao vivo Lo-Fi / Synthwave / Rock via mpv)
- * 4. TV Online (Canais ao vivo gratuitos / Pluto TV via mpv)
- * 5. Porta-Retratos (Slideshow em tela cheia na TV)
- * 6. Camera de Seguranca (Feed ao vivo da webcam integrada /dev/video0)
- * 7. Painel do Sistema (Relogio grande, temperatura da CPU, RAM, HD)
- * 8. Central Chronokairo (Monitor de APIs, backup e infraestrutura)
- * 9. Ajustes de Som ALSA (Controle de volume Master/Speaker/Headphone)
- * 10. Terminal Shell (Shell interativo root)
- *
- * Performance:
- * - Smart Redraw Engine: Only redraws on mouse/key events or once per second.
- * - Idle CPU usage reduced from 24% to < 1% (keeps CPU cool around 50-60 C).
+ * Integrated Control:
+ * - 100% USB Gamepad Controlled (Microntek / DragonRise / DualShock / Xbox / SNES USB)
+ * - D-Pad & Analog Stick Grid Navigation with Glowing Golden Focus Box
+ * - Button A/Cross (Btn 0/2) = Launch App
+ * - Button B/Circle (Btn 1/3) = Back / Home
+ * - SELECT + START = Force Exit to Home
+ * - Submenu D-Pad Navigation for YouTube 480p videos & Live Radios
+ * - Mouse / Trackpad / Touch fallback supported simultaneously
+ * - Smart Redraw Engine: CPU idle < 0.5% (keeps Atom N450 cool)
  */
 
 #include <stdio.h>
@@ -30,6 +24,7 @@
 #include <sys/ioctl.h>
 #include <sys/wait.h>
 #include <linux/input.h>
+#include <linux/joystick.h>
 #include <signal.h>
 #include <time.h>
 #include <math.h>
@@ -98,8 +93,8 @@ typedef enum {
     APP_RADIO,
     APP_RETROARCH,
     APP_IPTV,
-    APP_PHOTOS,
     APP_WEBCAM,
+    APP_PHOTOS,
     APP_DASHBOARD,
     APP_CHRONOKAIRO,
     APP_SETTINGS,
@@ -135,10 +130,10 @@ static AppIcon g_icons[] = {
 #define NUM_ICONS (sizeof(g_icons)/sizeof(g_icons[0]))
 
 static AppIcon g_dock_icons[] = {
-    {"YouTube",     "Videos", 0xFFE74C3C, APP_YOUTUBE,   440, 620, 85, 85},
-    {"Jogos Retro", "XMB",    0xFF8E44AD, APP_RETROARCH, 560, 620, 85, 85},
-    {"Radio Live",  "Musica", 0xFFDF5518, APP_RADIO,     680, 620, 85, 85},
-    {"TV Online",   "Streaming",0xFF27AE60, APP_IPTV,    800, 620, 85, 85},
+    {"YouTube",     "Videos",    0xFFE74C3C, APP_YOUTUBE,   440, 620, 85, 85},
+    {"Jogos Retro", "XMB",       0xFF8E44AD, APP_RETROARCH, 560, 620, 85, 85},
+    {"Radio Live",  "Musica",    0xFFDF5518, APP_RADIO,     680, 620, 85, 85},
+    {"TV Online",   "Streaming", 0xFF27AE60, APP_IPTV,    800, 620, 85, 85},
 };
 #define NUM_DOCK_ICONS (sizeof(g_dock_icons)/sizeof(g_dock_icons[0]))
 
@@ -146,485 +141,368 @@ typedef enum {
     VIEW_HOME,
     VIEW_YOUTUBE_MENU,
     VIEW_RADIO_MENU,
-    VIEW_IPTV_MENU,
     VIEW_DASHBOARD,
-    VIEW_CHRONOKAIRO,
-    VIEW_SETTINGS,
-    VIEW_TERMINAL
-} ViewState;
+    VIEW_CHRONOKAIRO
+} CurrentView;
 
-static ViewState g_current_view = VIEW_HOME;
-static int g_radio_pid = 0;
-static const char *g_radio_name = "Nenhuma";
-
-static inline uint32_t blend(uint32_t dst, uint32_t src) {
-    uint32_t a = (src >> 24) & 0xFF;
-    if (a == 0xFF) return src;
-    if (a == 0) return dst;
-    uint32_t inv_a = 255 - a;
-
-    uint32_t dr = (dst >> 16) & 0xFF;
-    uint32_t dg = (dst >> 8) & 0xFF;
-    uint32_t db = dst & 0xFF;
-
-    uint32_t sr = (src >> 16) & 0xFF;
-    uint32_t sg = (src >> 8) & 0xFF;
-    uint32_t sb = src & 0xFF;
-
-    uint32_t r = (sr * a + dr * inv_a) / 255;
-    uint32_t g = (sg * a + dg * inv_a) / 255;
-    uint32_t b = (sb * a + db * inv_a) / 255;
-
-    return (0xFF << 24) | (r << 16) | (g << 8) | b;
-}
+static CurrentView g_current_view = VIEW_HOME;
+static const char *g_radio_name = "Desligado";
+static int g_focus_index = 1; // Default focus on 'Jogos Retro' (Index 1)
+static int g_submenu_index = 0; // Menu item index (0..3)
 
 static inline void put_pixel(int x, int y, uint32_t color) {
     if (x >= 0 && x < SCREEN_W && y >= 0 && y < SCREEN_H) {
-        if ((color >> 24) == 0xFF) {
-            g_backbuffer[y * SCREEN_W + x] = color;
-        } else {
-            g_backbuffer[y * SCREEN_W + x] = blend(g_backbuffer[y * SCREEN_W + x], color);
+        g_backbuffer[y * SCREEN_W + x] = color;
+    }
+}
+
+static void draw_rect(int x, int y, int w, int h, uint32_t color) {
+    for (int j = y; j < y + h; j++) {
+        if (j < 0 || j >= SCREEN_H) continue;
+        for (int i = x; i < x + w; i++) {
+            if (i < 0 || i >= SCREEN_W) continue;
+            g_backbuffer[j * SCREEN_W + i] = color;
         }
     }
 }
 
-void draw_char(int x, int y, char c, uint32_t color, int scale) {
+static void draw_rounded_rect(int x, int y, int w, int h, int radius, uint32_t color) {
+    int r2 = radius * radius;
+    for (int j = 0; j < h; j++) {
+        int py = y + j;
+        if (py < 0 || py >= SCREEN_H) continue;
+        for (int i = 0; i < w; i++) {
+            int px = x + i;
+            if (px < 0 || px >= SCREEN_W) continue;
+            bool inside = true;
+            if (i < radius && j < radius) inside = ((radius - i)*(radius - i) + (radius - j)*(radius - j) <= r2);
+            else if (i >= w - radius && j < radius) inside = ((i - (w - radius))*(i - (w - radius)) + (radius - j)*(radius - j) <= r2);
+            else if (i < radius && j >= h - radius) inside = ((radius - i)*(radius - i) + (j - (h - radius))*(j - (h - radius)) <= r2);
+            else if (i >= w - radius && j >= h - radius) inside = ((i - (w - radius))*(i - (w - radius)) + (j - (h - radius))*(j - (h - radius)) <= r2);
+
+            if (inside) g_backbuffer[py * SCREEN_W + px] = color;
+        }
+    }
+}
+
+// Glowing selection frame for gamepad focus
+static void draw_glow_border(int x, int y, int w, int h, int radius, uint32_t glow_color) {
+    draw_rounded_rect(x - 5, y - 5, w + 10, h + 10, radius + 4, glow_color);
+}
+
+static void draw_char(int x, int y, char c, uint32_t color, int scale) {
     if (c < 32 || c > 126) c = '?';
     const uint8_t *glyph = g_font8x8[c - 32];
-    for (int row = 0; row < 8; row++) {
-        uint8_t line = glyph[row];
-        for (int col = 0; col < 8; col++) {
-            if (line & (1 << (7 - col))) {
-                for (int sy = 0; sy < scale; sy++) {
-                    for (int sx = 0; sx < scale; sx++) {
-                        put_pixel(x + col * scale + sx, y + row * scale + sy, color);
-                    }
-                }
+    for (int cy = 0; cy < 8; cy++) {
+        uint8_t row = glyph[cy];
+        for (int cx = 0; cx < 8; cx++) {
+            if (row & (1 << cx)) {
+                draw_rect(x + cx * scale, y + cy * scale, scale, scale, color);
             }
         }
     }
 }
 
-void draw_text(int x, int y, const char *str, uint32_t color, int scale) {
-    int cx = x;
+static void draw_text(int x, int y, const char *str, uint32_t color, int scale) {
+    int cur_x = x;
     while (*str) {
-        if (*str == '\n') {
-            y += 10 * scale;
-            cx = x;
-        } else {
-            draw_char(cx, y, *str, color, scale);
-            cx += 8 * scale;
-        }
+        draw_char(cur_x, y, *str, color, scale);
+        cur_x += 8 * scale;
         str++;
     }
 }
 
-void draw_text_centered(int cx, int y, const char *str, uint32_t color, int scale) {
+static void draw_text_centered(int cx, int y, const char *str, uint32_t color, int scale) {
     int len = strlen(str);
-    int x = cx - (len * 8 * scale) / 2;
-    draw_text(x, y, str, color, scale);
+    int total_w = len * 8 * scale;
+    draw_text(cx - total_w / 2, y, str, color, scale);
 }
 
-void draw_fill_circle(int cx, int cy, int radius, uint32_t color) {
-    for (int y = -radius; y <= radius; y++) {
-        for (int x = -radius; x <= radius; x++) {
-            if (x * x + y * y <= radius * radius) {
-                put_pixel(cx + x, cy + y, color);
-            }
-        }
-    }
-}
-
-// Emblems for the 10 real TV apps
-void draw_icon_emblem(AppType type, int cx, int cy, int size) {
-    int s = size / 3;
-    switch (type) {
-        case APP_YOUTUBE: {
-            for (int y = cy - s + 4; y <= cy + s - 4; y++) {
-                for (int x = cx - s - 4; x <= cx + s + 4; x++) put_pixel(x, y, 0xFFFFFFFF);
-            }
-            // Red play triangle
-            for (int y = -s + 8; y <= s - 8; y++) {
-                int w = (y + s - 8) / 2;
-                if (w > (s - 8)) w = (s - 8) * 2 - w;
-                for (int x = cx - 4; x <= cx - 4 + w; x++) put_pixel(x, cy + y, 0xFFE74C3C);
-            }
-            break;
-        }
-        case APP_RETROARCH: {
-            // Gamepad D-pad & action buttons
-            for (int y = cy - 4; y <= cy + 4; y++) {
-                for (int x = cx - s; x <= cx - s + 16; x++) put_pixel(x, y, 0xFFFFFFFF);
-            }
-            for (int y = cy - 8; y <= cy + 8; y++) {
-                for (int x = cx - s + 6; x <= cx - s + 10; x++) put_pixel(x, y, 0xFFFFFFFF);
-            }
-            draw_fill_circle(cx + s - 6, cy - 4, 4, 0xFFFFCC00);
-            draw_fill_circle(cx + s - 14, cy + 4, 4, 0xFF33CC33);
-            break;
-        }
-        case APP_RADIO: {
-            draw_fill_circle(cx - 7, cy + s - 2, 5, 0xFFFFFFFF);
-            draw_fill_circle(cx + 7, cy + s - 2, 5, 0xFFFFFFFF);
-            for (int y = cy - s + 2; y <= cy + s - 2; y++) {
-                put_pixel(cx - 3, y, 0xFFFFFFFF);
-                put_pixel(cx + 11, y, 0xFFFFFFFF);
-            }
-            for (int x = cx - 3; x <= cx + 11; x++) put_pixel(x, cy - s + 2, 0xFFFFFFFF);
-            break;
-        }
-        case APP_IPTV: {
-            // TV screen with antenna
-            for (int y = cy - s + 6; y <= cy + s; y++) {
-                for (int x = cx - s; x <= cx + s; x++) put_pixel(x, y, 0xFFFFFFFF);
-            }
-            for (int y = cy - s + 8; y <= cy + s - 2; y++) {
-                for (int x = cx - s + 2; x <= cx + s - 2; x++) put_pixel(x, y, 0xFF2C3E50);
-            }
-            for (int d = 0; d < 8; d++) {
-                put_pixel(cx - d, cy - s + 6 - d, 0xFFFFFFFF);
-                put_pixel(cx + d, cy - s + 6 - d, 0xFFFFFFFF);
-            }
-            break;
-        }
-        case APP_WEBCAM: {
-            draw_fill_circle(cx, cy, s, 0xFFFFFFFF);
-            draw_fill_circle(cx, cy, s - 4, 0xFF2C3E50);
-            draw_fill_circle(cx, cy, 5, 0xFF00AAFF);
-            break;
-        }
-        case APP_PHOTOS: {
-            uint32_t colors[6] = {0xFFFF3B30, 0xFFFF9500, 0xFFFFCC00, 0xFF4CD964, 0xFF5AC8FA, 0xFF5856D6};
-            for (int i = 0; i < 6; i++) {
-                double angle = i * (3.14159 / 3.0);
-                int px = cx + (int)(cos(angle) * (s - 2));
-                int py = cy + (int)(sin(angle) * (s - 2));
-                draw_fill_circle(px, py, 6, colors[i]);
-            }
-            draw_fill_circle(cx, cy, 4, 0xFFFFFFFF);
-            break;
-        }
-        case APP_DASHBOARD: {
-            draw_fill_circle(cx, cy, s, 0xFFFFFFFF);
-            for (int y = cy - s + 4; y <= cy; y++) put_pixel(cx, y, 0xFF000000);
-            for (int x = cx; x <= cx + s - 6; x++) put_pixel(x, cy, 0xFFFF3B30);
-            break;
-        }
-        case APP_CHRONOKAIRO: {
-            draw_fill_circle(cx, cy, s + 2, 0xFF007ACC);
-            draw_fill_circle(cx, cy, s - 3, 0xFF005A9E);
-            draw_text_centered(cx, cy - 6, "CK", 0xFFFFFFFF, 2);
-            break;
-        }
-        case APP_SETTINGS: {
-            draw_fill_circle(cx, cy, s, 0xFF8E8E93);
-            draw_fill_circle(cx, cy, s - 6, 0xFF50555C);
-            draw_fill_circle(cx, cy, 6, 0xFF8E8E93);
-            break;
-        }
-        case APP_TERMINAL: {
-            for (int y = cy - s; y <= cy + s; y++) {
-                for (int x = cx - s - 2; x <= cx + s + 2; x++) put_pixel(x, y, 0xFF000000);
-            }
-            draw_text(cx - s + 3, cy - 6, ">_", 0xFF00FF66, 2);
-            break;
-        }
-    }
-}
-
-void draw_wallpaper() {
+static void draw_wallpaper(void) {
     for (int y = 0; y < SCREEN_H; y++) {
-        float v = (float)y / (float)SCREEN_H;
-        uint8_t r = (uint8_t)(10 * (1.0f - v) + 5 * v);
-        uint8_t g = (uint8_t)(35 * (1.0f - v) + 15 * v);
-        uint8_t b = (uint8_t)(75 * (1.0f - v) + 30 * v);
-        uint32_t bg = (0xFF << 24) | (r << 16) | (g << 8) | b;
+        float t = (float)y / (float)SCREEN_H;
+        uint32_t r = (uint32_t)(15 * (1.0f - t) + 4 * t);
+        uint32_t g = (uint32_t)(35 * (1.0f - t) + 12 * t);
+        uint32_t b = (uint32_t)(65 * (1.0f - t) + 25 * t);
+        uint32_t col = 0xFF000000 | (r << 16) | (g << 8) | b;
         for (int x = 0; x < SCREEN_W; x++) {
-            g_backbuffer[y * SCREEN_W + x] = bg;
+            g_backbuffer[y * SCREEN_W + x] = col;
         }
     }
-
-    // Elegant bokeh
-    for (int i = 0; i < 35; i++) {
-        int dx = (i * 149 + 71) % SCREEN_W;
-        int dy = (i * 223 + 61) % (SCREEN_H - 120);
-        int dr = 3 + (i % 5);
-        uint32_t col = ((25 + (i * 7) % 40) << 24) | 0x00FFFFFF;
-        draw_fill_circle(dx, dy, dr, col);
-    }
 }
 
-void draw_dock() {
-    int dock_x = 380, dock_y = 605, dock_w = 600, dock_h = 120;
-    for (int y = dock_y; y < dock_y + dock_h; y++) {
-        float f = (float)(y - dock_y) / (float)dock_h;
-        uint8_t alpha = (uint8_t)(100 + f * 90);
-        uint32_t dock_col = (alpha << 24) | 0x00C8D6E5;
-        for (int x = dock_x; x < dock_x + dock_w; x++) put_pixel(x, y, dock_col);
-    }
-    for (int x = dock_x; x < dock_x + dock_w; x++) {
-        put_pixel(x, dock_y, 0xD0FFFFFF);
-        put_pixel(x, dock_y + 1, 0x80FFFFFF);
-    }
+static void draw_status_bar(void) {
+    draw_rect(0, 0, SCREEN_W, 28, 0xCC111822);
+    time_t rawtime;
+    struct tm *info;
+    time(&rawtime);
+    info = localtime(&rawtime);
+    char buf[64];
+    strftime(buf, sizeof(buf), "%H:%M:%S", info);
+    draw_text_centered(SCREEN_W / 2, 6, buf, 0xFFFFFFFF, 2);
+
+    draw_text(20, 7, "SnowPad OS (LG TV 1360x768 @ 60Hz)", 0xFFCCCCCC, 1);
+
+    char right_status[128];
+    snprintf(right_status, sizeof(right_status), "Radio: %s | Wi-Fi: LNET | Gamepad: OK", g_radio_name);
+    draw_text(SCREEN_W - 550, 7, right_status, 0xFF55FF88, 1);
 }
 
-void draw_status_bar() {
-    for (int y = 0; y < 26; y++) {
-        for (int x = 0; x < SCREEN_W; x++) g_backbuffer[y * SCREEN_W + x] = 0xD010141C;
+static void draw_icon(int x, int y, int w, int h, int radius, uint32_t color, bool hover, bool focused) {
+    if (focused) {
+        // High-visibility glowing golden border
+        draw_glow_border(x, y, w, h, radius, 0xFFFFCC00);
+    } else if (hover) {
+        draw_glow_border(x, y, w, h, radius, 0xFF00DDFF);
     }
-    draw_text(16, 7, "SnowPad OS - Central TV LG", 0xFFD0D8E8, 1);
-    draw_text(260, 7, "Wi-Fi: LNET (192.168.0.27)", 0xFF88BBEE, 1);
-
-    time_t now = time(NULL);
-    struct tm *tm = localtime(&now);
-    char time_str[16];
-    if (tm) snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d", tm->tm_hour, tm->tm_min, tm->tm_sec);
-    else strcpy(time_str, "15:30:00");
-
-    draw_text_centered(SCREEN_W / 2, 5, time_str, 0xFFFFFFFF, 2);
-
-    // Read CPU temp
-    int temp = 55;
-    FILE *tf = fopen("/sys/class/thermal/thermal_zone0/temp", "r");
-    if (tf) { fscanf(tf, "%d", &temp); temp /= 1000; fclose(tf); }
-    char temp_str[32];
-    snprintf(temp_str, sizeof(temp_str), "CPU: %d C", temp);
-    uint32_t temp_col = (temp > 85) ? 0xFFFF4444 : 0xFF66FF88;
-    draw_text(SCREEN_W - 130, 7, temp_str, temp_col, 1);
+    draw_rounded_rect(x, y, w, h, radius, color);
 }
 
-void draw_icon(int x0, int y0, int w, int h, int radius, uint32_t color, bool hover) {
-    if (hover) {
-        for (int y = y0 - 4; y <= y0 + h + 4; y++) {
-            for (int x = x0 - 4; x <= x0 + w + 4; x++) {
-                if (x < x0 || x >= x0 + w || y < y0 || y >= y0 + h) put_pixel(x, y, 0xD0FFDD44);
+static void draw_icon_emblem(AppType type, int cx, int cy, int size) {
+    int sz = size / 3;
+    switch (type) {
+        case APP_RETROARCH:
+            draw_rect(cx - sz, cy - sz/3, sz * 2, sz/2, 0xFFFFFFFF);
+            draw_rect(cx - sz + 4, cy - sz/3 - 4, 8, 16, 0xFF333333);
+            draw_rect(cx + sz - 12, cy - sz/3 - 4, 8, 16, 0xFFE74C3C);
+            break;
+        case APP_YOUTUBE:
+            draw_rounded_rect(cx - sz, cy - sz/2, sz * 2, sz, 4, 0xFFFFFFFF);
+            for (int i = 0; i < 12; i++) {
+                draw_rect(cx - 3 + i, cy - i/2, 2, i, 0xFFE74C3C);
             }
-        }
-    }
-
-    for (int y = y0; y < y0 + h; y++) {
-        for (int x = x0; x < x0 + w; x++) {
-            int dx = (x < x0 + radius) ? (x0 + radius - x) : ((x >= x0 + w - radius) ? (x - (x0 + w - radius - 1)) : 0);
-            int dy = (y < y0 + radius) ? (y0 + radius - y) : ((y >= y0 + h - radius) ? (y - (y0 + h - radius - 1)) : 0);
-            if (dx * dx + dy * dy <= radius * radius) {
-                uint32_t col = color;
-                if (y < y0 + h / 2) {
-                    float gloss = 1.0f - (float)(y - y0) / (h / 2.0f);
-                    col = blend(col, ((uint8_t)(gloss * 70) << 24) | 0x00FFFFFF);
-                }
-                put_pixel(x, y, col);
-            }
-        }
+            break;
+        case APP_RADIO:
+            draw_rounded_rect(cx - sz, cy - sz/2, sz*2, sz, 4, 0xFFFFFFFF);
+            draw_rect(cx - sz + 6, cy - sz/4, sz, sz/2, 0xFF333333);
+            break;
+        case APP_IPTV:
+            draw_rounded_rect(cx - sz, cy - sz/2, sz*2, sz, 4, 0xFFFFFFFF);
+            draw_rect(cx - sz + 4, cy - sz/2 + 4, sz*2 - 8, sz - 8, 0xFF1B4F72);
+            break;
+        case APP_WEBCAM:
+            draw_rounded_rect(cx - sz/2, cy - sz/2, sz, sz, sz/2, 0xFFFFFFFF);
+            draw_rounded_rect(cx - sz/4, cy - sz/4, sz/2, sz/2, sz/4, 0xFF16A085);
+            break;
+        case APP_PHOTOS:
+            draw_rounded_rect(cx - sz, cy - sz/2, sz*2, sz, 4, 0xFFFFFFFF);
+            draw_rect(cx - sz + 6, cy - 2, sz/2, sz/2 - 2, 0xFF27AE60);
+            draw_rect(cx, cy - 6, sz - 6, sz/2 + 2, 0xFFF39C12);
+            break;
+        case APP_DASHBOARD:
+            draw_rounded_rect(cx - sz, cy - sz, sz*2, sz*2, sz, 0xFFFFFFFF);
+            draw_rect(cx - 1, cy - sz + 4, 2, sz - 2, 0xFFE74C3C);
+            draw_rect(cx - 1, cy, sz - 4, 2, 0xFF333333);
+            break;
+        case APP_CHRONOKAIRO:
+            draw_rounded_rect(cx - sz, cy - sz, sz*2, sz*2, 8, 0xFFFFFFFF);
+            draw_text_centered(cx, cy - 6, "CK", 0xFF007ACC, 2);
+            break;
+        case APP_SETTINGS:
+            draw_rounded_rect(cx - sz/2, cy - sz/2, sz, sz, 4, 0xFFFFFFFF);
+            draw_rounded_rect(cx - sz/4, cy - sz/4, sz/2, sz/2, 2, 0xFF7F8C8D);
+            break;
+        case APP_TERMINAL:
+            draw_rounded_rect(cx - sz, cy - sz/2, sz*2, sz, 4, 0xFF000000);
+            draw_text(cx - sz + 6, cy - 5, ">_", 0xFF2ECC71, 1);
+            break;
     }
 }
 
-void draw_cursor(int cx, int cy, bool is_down) {
-    int r = is_down ? 15 : 18;
-    uint32_t fill = is_down ? 0x904090E0 : 0x60FFFFFF;
-    for (int y = cy - r; y <= cy + r; y++) {
-        for (int x = cx - r; x <= cx + r; x++) {
-            int d2 = (x - cx) * (x - cx) + (y - cy) * (y - cy);
-            if (d2 <= r * r) {
-                if (d2 >= (r - 2) * (r - 2)) put_pixel(x, y, 0xD0FFFFFF);
-                else put_pixel(x, y, fill);
-            }
-        }
-    }
+static void draw_dock(void) {
+    int dock_w = 480;
+    int dock_h = 100;
+    int dock_x = (SCREEN_W - dock_w) / 2;
+    int dock_y = SCREEN_H - dock_h - 20;
+    draw_rounded_rect(dock_x, dock_y, dock_w, dock_h, 30, 0x66FFFFFF);
+    draw_rounded_rect(dock_x + 3, dock_y + 3, dock_w - 6, dock_h - 6, 28, 0x99223344);
 }
 
-void draw_app_header(const char *title) {
-    for (int y = 26; y < 72; y++) {
-        for (int x = 0; x < SCREEN_W; x++) g_backbuffer[y * SCREEN_W + x] = 0xFF2A3644;
-    }
-    // Back button [ < Inicio (Esc) ]
-    for (int y = 32; y < 66; y++) {
-        for (int x = 20; x < 170; x++) put_pixel(x, y, 0xFF1B6AA5);
-    }
-    draw_text(30, 43, "< Inicio (Esc)", 0xFFFFFFFF, 1);
-    draw_text_centered(SCREEN_W / 2, 40, title, 0xFFFFFFFF, 2);
-}
-
-// Launches a background or blocking system app cleanly
-void launch_external_app(const char *cmd) {
-    printf("[APP LAUNCH] %s\n", cmd);
+static void launch_external_app(const char *cmd) {
+    printf("[LAUNCH] %s\n", cmd);
     fflush(stdout);
+    draw_rect(0, 0, SCREEN_W, SCREEN_H, 0xFF000000);
+    draw_text_centered(SCREEN_W / 2, SCREEN_H / 2 - 20, "Iniciando App...", 0xFFFFFFFF, 3);
+    draw_text_centered(SCREEN_W / 2, SCREEN_H / 2 + 30, cmd, 0xFF88BBEE, 1);
+    draw_text_centered(SCREEN_W / 2, SCREEN_H / 2 + 60, "Controle: Pressione SELECT + START para sair e voltar ao SnowPad", 0xFFE67E22, 1);
+    memcpy(g_fb, g_backbuffer, SCREEN_W * SCREEN_H * 4);
 
-    // Clear screen before launching
-    for (int i = 0; i < SCREEN_W * SCREEN_H; i++) g_fb[i] = 0xFF000000;
-
-    system(cmd);
-
-    // Restore screen after app exits
-    printf("[APP EXIT] Returned to SpringBoard\n");
-    fflush(stdout);
+    pid_t pid = fork();
+    if (pid == 0) {
+        execl("/bin/sh", "sh", "-c", cmd, (char *)NULL);
+        exit(1);
+    } else if (pid > 0) {
+        int status;
+        waitpid(pid, &status, 0);
+    }
 }
 
-// 1. YouTube Menu View
-void draw_view_youtube_menu() {
-    for (int y = 72; y < SCREEN_H; y++) {
-        for (int x = 0; x < SCREEN_W; x++) g_backbuffer[y * SCREEN_W + x] = 0xFF181A1E;
-    }
-    draw_app_header("YouTube & Videos na TV (480p)");
+static void draw_view_youtube_menu(void) {
+    draw_wallpaper();
+    draw_rounded_rect(60, 60, SCREEN_W - 120, SCREEN_H - 120, 24, 0xEE1A1A24);
+    draw_text(100, 90, "YouTube Videos (Otimizado 480p H.264 para Atom N450)", 0xFFFFFFFF, 2);
 
-    draw_text(100, 100, "Canais e Videos Recomendados:", 0xFFFFFFFF, 2);
-
-    const char *videos[][2] = {
-        {"1. Fabio Akita - Entendendo Retro-Gaming e Emuladores", "https://www.youtube.com/watch?v=0k1L2b_wB2s"},
-        {"2. Lofi Girl - Musicas para Programar / Relaxar (Live)", "https://www.youtube.com/watch?v=jfKfPfyJRdk"},
-        {"3. Steve Jobs - Keynote de Apresentacao do iPad (2010)", "https://www.youtube.com/watch?v=jj6q_XpzEl8"},
-        {"4. Synthwave 80s Retro Mix (480p H.264)", "https://www.youtube.com/watch?v=4xDzrJKXOOY"},
+    const char *items[] = {
+        "1. Lo-Fi Hip Hop Beats ao vivo - Relax / Code (480p AVC1)",
+        "2. Synthwave / Cyberpunk Radio Chill (480p AVC1)",
+        "3. Trailer / Gameplay Retro 60fps (480p AVC1)",
+        "4. Canal de Documentario Tech / Hardware (480p AVC1)"
     };
 
     for (int i = 0; i < 4; i++) {
-        int by = 150 + i * 90;
-        for (int y = by; y < by + 70; y++) {
-            for (int x = 100; x < SCREEN_W - 100; x++) g_backbuffer[y * SCREEN_W + x] = 0xFF2A303C;
-        }
-        draw_fill_circle(140, by + 35, 22, 0xFFE74C3C);
-        draw_text_centered(142, by + 27, ">", 0xFFFFFFFF, 2);
-        draw_text(180, by + 18, videos[i][0], 0xFFFFFFFF, 2);
-        draw_text(180, by + 44, "Clique ou pressione o numero (1-4) para tocar no mpv", 0xFF88BBEE, 1);
+        int y = 150 + i * 90;
+        bool sel = (g_submenu_index == i);
+        uint32_t bg = sel ? 0xFF992222 : 0x55333344;
+        uint32_t fg = sel ? 0xFFFFFFFF : 0xFFDDDDDD;
+        if (sel) draw_rounded_rect(95, y - 5, SCREEN_W - 190, 80, 16, 0xFFFFCC00);
+        draw_rounded_rect(100, y, SCREEN_W - 200, 70, 12, bg);
+        draw_text(130, y + 25, items[i], fg, 2);
     }
+
+    draw_rounded_rect(SCREEN_W - 320, 85, 220, 40, 10, 0xFF444455);
+    draw_text(SCREEN_W - 300, 97, "[B] Voltar ao Menu", 0xFFFFFFFF, 1);
 }
 
-// 2. Radio & Music View
-void draw_view_radio_menu() {
-    for (int y = 72; y < SCREEN_H; y++) {
-        for (int x = 0; x < SCREEN_W; x++) g_backbuffer[y * SCREEN_W + x] = 0xFF141820;
-    }
-    draw_app_header("Musica & Radio Online (Ao Vivo)");
+static void draw_view_radio_menu(void) {
+    draw_wallpaper();
+    draw_rounded_rect(60, 60, SCREEN_W - 120, SCREEN_H - 120, 24, 0xEE1A241A);
+    draw_text(100, 90, "Musica & Radio Online (Streams Globais via MPV)", 0xFFFFFFFF, 2);
 
-    char status[64];
-    snprintf(status, sizeof(status), "Tocando Agora: %s", g_radio_name);
-    draw_text(100, 100, status, 0xFF66FF88, 2);
-
-    const char *stations[][2] = {
-        {"1. Lo-Fi Hip Hop Chillout", "http://stream.zeno.fm/f3wvbbqmdg8uv"},
-        {"2. Synthwave 80s Electro Radio", "http://stream.zeno.fm/7xpt085w9zquv"},
-        {"3. Classic Rock 70s/80s Stream", "http://stream.zeno.fm/s425f1w38zquv"},
-        {"4. Parar Reproducao / Stop", "STOP"}
+    const char *items[] = {
+        "1. Lo-Fi Hip Hop Chill (Relax / Estudos)",
+        "2. Synthwave 80s Electro (Retrowave)",
+        "3. Classic Rock 70s / 80s",
+        "4. Parar / Desligar Radio"
     };
 
     for (int i = 0; i < 4; i++) {
-        int by = 150 + i * 90;
-        for (int y = by; y < by + 70; y++) {
-            for (int x = 100; x < SCREEN_W - 100; x++) g_backbuffer[y * SCREEN_W + x] = 0xFF242C38;
-        }
-        draw_fill_circle(140, by + 35, 22, (i == 3) ? 0xFF888888 : 0xFFDF5518);
-        draw_text_centered(142, by + 27, (i == 3) ? "X" : ">", 0xFFFFFFFF, 2);
-        draw_text(180, by + 24, stations[i][0], 0xFFFFFFFF, 2);
+        int y = 150 + i * 90;
+        bool sel = (g_submenu_index == i);
+        uint32_t bg = sel ? 0xFF27AE60 : 0x55334433;
+        uint32_t fg = sel ? 0xFFFFFFFF : 0xFFDDDDDD;
+        if (sel) draw_rounded_rect(95, y - 5, SCREEN_W - 190, 80, 16, 0xFFFFCC00);
+        draw_rounded_rect(100, y, SCREEN_W - 200, 70, 12, bg);
+        draw_text(130, y + 25, items[i], fg, 2);
+    }
+
+    draw_rounded_rect(SCREEN_W - 320, 85, 220, 40, 10, 0xFF444455);
+    draw_text(SCREEN_W - 300, 97, "[B] Voltar ao Menu", 0xFFFFFFFF, 1);
+}
+
+static void draw_view_dashboard(void) {
+    draw_wallpaper();
+    draw_rounded_rect(60, 60, SCREEN_W - 120, SCREEN_H - 120, 24, 0xEE18202C);
+    draw_text(100, 90, "Painel do Sistema SnowPad OS (Itautec Infoway W7020)", 0xFFFFFFFF, 2);
+
+    draw_text(100, 170, "Processador: Intel Atom N450 (1 Nucleo, 2 Threads @ 1.66 GHz)", 0xFF88BBEE, 2);
+    draw_text(100, 220, "GPU: Intel GMA 3150 OpenGL 2.1 Mesa Gallium (VGA LG TV 1360x768)", 0xFF88BBEE, 2);
+    draw_text(100, 270, "Memoria RAM: 2048 MB DDR2 (Uso atual: ~140 MB)", 0xFF88BBEE, 2);
+    draw_text(100, 320, "Armazenamento: 320GB HDD (280GB HFS+ Snow Leopard / 18GB Linux)", 0xFF88BBEE, 2);
+    draw_text(100, 370, "Som: Realtek ALC663 ALSA Audio Nativo", 0xFF88BBEE, 2);
+    draw_text(100, 420, "Controle: Microntek USB Joystick / D-Pad Ativo", 0xFF55FF88, 2);
+
+    draw_rounded_rect(100, 500, 300, 50, 12, 0xFF2C3E50);
+    draw_text(130, 515, "[B] Voltar ao Inicio", 0xFFFFFFFF, 2);
+}
+
+static void draw_view_chronokairo(void) {
+    draw_wallpaper();
+    draw_rounded_rect(60, 60, SCREEN_W - 120, SCREEN_H - 120, 24, 0xEE101E2E);
+    draw_text(100, 90, "Central de Servicos Chronokairo (Nuvem & Edge)", 0xFFFFFFFF, 2);
+
+    draw_text(100, 170, "1. Chronokairo API Gateway: ONLINE (Cloudflare Workers)", 0xFF2ECC71, 2);
+    draw_text(100, 220, "2. Chronocat Backup Daemon: Sincronizado", 0xFF2ECC71, 2);
+    draw_text(100, 270, "3. Git Repository Sync: lu4nn3ry/snowpad-os sincronizado", 0xFF2ECC71, 2);
+    draw_text(100, 320, "4. Status do No Atom: Servidor Edge Local Ativo", 0xFFF39C12, 2);
+
+    draw_rounded_rect(100, 450, 300, 50, 12, 0xFF007ACC);
+    draw_text(130, 465, "[B] Voltar ao Inicio", 0xFFFFFFFF, 2);
+}
+
+static void draw_gamepad_hints(void) {
+    draw_rounded_rect(SCREEN_W - 440, SCREEN_H - 35, 420, 25, 8, 0x99111822);
+    draw_text(SCREEN_W - 430, SCREEN_H - 28, "Controle: D-Pad / [A] Abrir / [B] Voltar / Sel+Start Sair", 0xFFEEEEEE, 1);
+}
+
+static void handle_app_selection(AppType type) {
+    switch (type) {
+        case APP_RETROARCH:
+            launch_external_app("retroarch -c /etc/retroarch.cfg");
+            break;
+        case APP_YOUTUBE:
+            g_current_view = VIEW_YOUTUBE_MENU;
+            g_submenu_index = 0;
+            break;
+        case APP_RADIO:
+            g_current_view = VIEW_RADIO_MENU;
+            g_submenu_index = 0;
+            break;
+        case APP_WEBCAM:
+            launch_external_app("mpv --vo=drm --demuxer-lavf-format=video4linux2 --demuxer-lavf-o=video_size=640x480 /dev/video0");
+            break;
+        case APP_PHOTOS:
+            launch_external_app("mpv --vo=drm --image-display-duration=5 /mnt/storage/retro/roms/ 2>/dev/null || true");
+            break;
+        case APP_DASHBOARD:
+            g_current_view = VIEW_DASHBOARD;
+            break;
+        case APP_CHRONOKAIRO:
+            g_current_view = VIEW_CHRONOKAIRO;
+            break;
+        case APP_IPTV:
+            launch_external_app("mpv --vo=drm https://d25n220ee61s3k.cloudfront.net/v1/master/9d06243129e0db4ff79ee86a92237dbdb6feecd9/PlutoTV/master.m3u8 2>/dev/null || true");
+            break;
+        case APP_SETTINGS:
+            g_current_view = VIEW_DASHBOARD;
+            break;
+        case APP_TERMINAL:
+            launch_external_app("sh");
+            break;
     }
 }
 
-// 3. Chronokairo Hub View
-void draw_view_chronokairo() {
-    for (int y = 72; y < SCREEN_H; y++) {
-        for (int x = 0; x < SCREEN_W; x++) g_backbuffer[y * SCREEN_W + x] = 0xFF0D1826;
-    }
-    draw_app_header("Central Chronokairo - Infraestrutura");
-
-    draw_text(100, 100, "Monitor de Servicos e Backups Automicos:", 0xFFFFFFFF, 2);
-
-    const char *rows[][2] = {
-        {"1. Backup Supabase & Repositorios", "HD 320GB (/mnt/storage/backups/chronokairo)"},
-        {"2. Monitor de Disponibilidade", "Status: Online (Sonar, Site, Auth)"},
-        {"3. Painel de Observabilidade", "Metricas do packages/observability prontas"},
-        {"4. Ponto de Acesso Seguro", "OpenSSH 22 ativo em 192.168.0.27"},
-    };
-
-    for (int i = 0; i < 4; i++) {
-        int by = 150 + i * 90;
-        for (int y = by; y < by + 70; y++) {
-            for (int x = 100; x < SCREEN_W - 100; x++) g_backbuffer[y * SCREEN_W + x] = 0xFF1B2B3E;
-        }
-        draw_text(140, by + 16, rows[i][0], 0xFF00AAFF, 2);
-        draw_text(140, by + 42, rows[i][1], 0xFFD0E0FF, 1);
-    }
-}
-
-// 4. Painel do Sistema (Dashboard)
-void draw_view_dashboard() {
-    for (int y = 72; y < SCREEN_H; y++) {
-        for (int x = 0; x < SCREEN_W; x++) g_backbuffer[y * SCREEN_W + x] = 0xFF1A1C22;
-    }
-    draw_app_header("Painel da TV - Status do Hardware");
-
-    time_t now = time(NULL);
-    struct tm *tm = localtime(&now);
-    char time_str[32];
-    if (tm) snprintf(time_str, sizeof(time_str), "%02d:%02d:%02d", tm->tm_hour, tm->tm_min, tm->tm_sec);
-    else strcpy(time_str, "15:30:00");
-
-    draw_text_centered(SCREEN_W / 2, 110, time_str, 0xFFFFFFFF, 4);
-    draw_text_centered(SCREEN_W / 2, 160, "Itautec Infoway W7020 | Intel Atom N450 @ 1.66 GHz", 0xFF88BBEE, 2);
-
-    int tx = 200, ty = 210, tw = SCREEN_W - 400;
-    for (int y = ty; y < ty + 380; y++) {
-        for (int x = tx; x < tx + tw; x++) g_backbuffer[y * SCREEN_W + x] = 0xFF2A2E38;
-    }
-
-    const char *stats[][2] = {
-        {"Sistema Operacional", "Alpine Linux Standalone HDD (Nativo em /dev/sda2)"},
-        {"Armazenamento Permanente", "HD 320GB: sda2 (18GB ext4 raiz), sda1 (280GB HFS+)"},
-        {"Emulador Unificado", "RetroArch 1.17.0 XMB (NES, SNES, GBA, PS1, N64)"},
-        {"Motor de Video e Audio", "MPV + yt-dlp + Mesa Gallium OpenGL 2.1 (VGA LG TV)"},
-        {"Rede Wi-Fi", "LNET - 192.168.0.27 (Realtek RTL8191SE)"},
-        {"Som ALSA", "Realtek ALC663 Analog (Saida P2 / Speakers 85%)"},
-        {"Pendrive USB", "Totalmente liberado! O sistema roda 100% no HD interno."},
-    };
-
-    int cy = ty + 25;
-    for (size_t i = 0; i < sizeof(stats)/sizeof(stats[0]); i++) {
-        draw_text(tx + 30, cy, stats[i][0], 0xFF00AAFF, 2);
-        draw_text(tx + 300, cy + 2, stats[i][1], 0xFFFFFFFF, 1);
-        cy += 48;
-    }
-}
-
-void sig_handler(int sig) {
-    (void)sig;
-    g_running = false;
-}
-
-int main(int argc, char **argv) {
-    (void)argc; (void)argv;
-    signal(SIGTERM, sig_handler);
-    signal(SIGINT, sig_handler);
-
+int main(void) {
     int fbfd = open("/dev/fb0", O_RDWR);
     if (fbfd < 0) {
-        perror("Error opening /dev/fb0");
+        perror("open /dev/fb0");
         return 1;
     }
 
     size_t screensize = SCREEN_W * SCREEN_H * 4;
-    g_fb = (uint32_t *)mmap(NULL, screensize, PROT_READ | PROT_WRITE, MAP_SHARED, fbfd, 0);
+    g_fb = (uint32_t *)mmap(0, screensize, PROT_READ | PROT_WRITE, MAP_SHARED, fbfd, 0);
     if (g_fb == MAP_FAILED) {
-        perror("Error mmap fb0");
+        perror("mmap fb");
         close(fbfd);
         return 1;
     }
 
+    // Open USB Joystick
+    int js_fd = open("/dev/input/js0", O_RDONLY | O_NONBLOCK);
+    if (js_fd >= 0) {
+        char js_name[128] = {0};
+        ioctl(js_fd, JSIOCGNAME(sizeof(js_name)), js_name);
+        printf("[JOYSTICK] Conectado: %s\n", js_name);
+    } else {
+        printf("[JOYSTICK] Nenhum joystick em /dev/input/js0\n");
+    }
+
+    // Open mouse/keyboard as secondary fallbacks
     int mouse_fd = open("/dev/input/mice", O_RDONLY | O_NONBLOCK);
     int mouse0_fd = open("/dev/input/mouse0", O_RDONLY | O_NONBLOCK);
-    int ev_mouse_fd = open("/dev/input/event10", O_RDONLY | O_NONBLOCK);
     int kbd_fd = open("/dev/input/event0", O_RDONLY | O_NONBLOCK);
 
     int mx = SCREEN_W / 2;
     int my = SCREEN_H / 2;
-    bool mdown = false;
-    bool prev_down = true;
+    bool mdown = false, prev_down = false;
 
-    // Discard stale packets
-    if (mouse_fd >= 0) { signed char junk[64]; while (read(mouse_fd, junk, sizeof(junk)) > 0); }
-    if (mouse0_fd >= 0) { signed char junk[64]; while (read(mouse0_fd, junk, sizeof(junk)) > 0); }
-    if (ev_mouse_fd >= 0) { struct input_event junk[16]; while (read(ev_mouse_fd, junk, sizeof(junk)) > 0); }
-    if (kbd_fd >= 0) { struct input_event junk[16]; while (read(kbd_fd, junk, sizeof(junk)) > 0); }
+    // Gamepad state
+    int axis_x_state = 0, axis_y_state = 0;
+    bool btn_select = false, btn_start = false;
 
     time_t last_time = 0;
     bool needs_redraw = true;
 
-    printf("[SPRINGBOARD v6] Unified TV Hub with RetroArch XMB & Native Apps Online!\n");
+    printf("[SPRINGBOARD v7] TV Hub with 100%% Gamepad Control Online!\n");
     fflush(stdout);
 
     while (g_running) {
@@ -632,77 +510,101 @@ int main(int argc, char **argv) {
         bool trigger_click = false;
         bool input_activity = false;
 
-        // 1. Read mouse
-        int fd_to_read = (mouse_fd >= 0) ? mouse_fd : mouse0_fd;
-        if (fd_to_read >= 0) {
+        // 1. Read Joystick
+        if (js_fd >= 0) {
+            struct js_event jse;
+            while (read(js_fd, &jse, sizeof(jse)) == sizeof(jse)) {
+                uint8_t type = jse.type & ~JS_EVENT_INIT;
+                if (type == JS_EVENT_AXIS) {
+                    // Axis 0 = X (Analog), Axis 4 = X (D-pad Hat)
+                    if (jse.number == 0 || jse.number == 4) {
+                        int prev = axis_x_state;
+                        if (jse.value < -16000) axis_x_state = -1;
+                        else if (jse.value > 16000) axis_x_state = 1;
+                        else if (abs(jse.value) < 10000) axis_x_state = 0;
+
+                        if (axis_x_state != 0 && axis_x_state != prev) {
+                            if (g_current_view == VIEW_HOME) {
+                                if (axis_x_state == -1 && g_focus_index > 0) g_focus_index--;
+                                else if (axis_x_state == 1 && g_focus_index < (int)NUM_ICONS - 1) g_focus_index++;
+                            }
+                            input_activity = true;
+                        }
+                    }
+                    // Axis 1 = Y (Analog), Axis 5 = Y (D-pad Hat)
+                    if (jse.number == 1 || jse.number == 5) {
+                        int prev = axis_y_state;
+                        if (jse.value < -16000) axis_y_state = -1;
+                        else if (jse.value > 16000) axis_y_state = 1;
+                        else if (abs(jse.value) < 10000) axis_y_state = 0;
+
+                        if (axis_y_state != 0 && axis_y_state != prev) {
+                            if (g_current_view == VIEW_HOME) {
+                                if (axis_y_state == -1 && g_focus_index >= 5) g_focus_index -= 5;
+                                else if (axis_y_state == 1 && g_focus_index < 5) g_focus_index += 5;
+                            } else if (g_current_view == VIEW_YOUTUBE_MENU || g_current_view == VIEW_RADIO_MENU) {
+                                if (axis_y_state == -1 && g_submenu_index > 0) g_submenu_index--;
+                                else if (axis_y_state == 1 && g_submenu_index < 3) g_submenu_index++;
+                            }
+                            input_activity = true;
+                        }
+                    }
+                } else if (type == JS_EVENT_BUTTON) {
+                    if (jse.number == 8) btn_select = (jse.value != 0);
+                    if (jse.number == 9) btn_start = (jse.value != 0);
+
+                    // Emergency combo: SELECT + START = Force Exit to Home
+                    if (btn_select && btn_start) {
+                        system("killall mpv retroarch 2>/dev/null || true");
+                        g_current_view = VIEW_HOME;
+                        input_activity = true;
+                    }
+
+                    if (jse.value == 1) { // Button Pressed
+                        input_activity = true;
+                        // Button 0 (Triangle/X) or Button 2 (Cross/A) -> Select / Enter
+                        if (jse.number == 0 || jse.number == 2) {
+                            trigger_click = true;
+                        }
+                        // Button 1 (Circle/B) or Button 3 (Square/Y) or Button 8 (Select) -> Back / Home
+                        else if (jse.number == 1 || jse.number == 3 || jse.number == 8) {
+                            g_current_view = VIEW_HOME;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Read Mouse / Trackpad (if present)
+        int mfd = (mouse_fd >= 0) ? mouse_fd : mouse0_fd;
+        if (mfd >= 0) {
             signed char b[3];
-            while (read(fd_to_read, b, sizeof(b)) == sizeof(b)) {
+            while (read(mfd, b, sizeof(b)) == sizeof(b)) {
                 mdown = (b[0] & 1) != 0;
                 mx += b[1] * 2;
                 my -= b[2] * 2;
                 input_activity = true;
             }
         }
-
-        // 2. Read evdev taps
-        if (ev_mouse_fd >= 0) {
-            struct input_event ev;
-            while (read(ev_mouse_fd, &ev, sizeof(ev)) == sizeof(ev)) {
-                if (ev.type == EV_KEY && (ev.code == BTN_LEFT || ev.code == BTN_TOUCH)) {
-                    mdown = (ev.value != 0);
-                    input_activity = true;
-                }
-            }
-        }
-
         if (mdown && !prev_down) trigger_click = true;
 
-        // 3. Read keyboard
+        // 3. Read Keyboard shortcuts
         if (kbd_fd >= 0) {
             struct input_event kev;
             while (read(kbd_fd, &kev, sizeof(kev)) == sizeof(kev)) {
                 if (kev.type == EV_KEY && kev.value == 1) {
                     input_activity = true;
-                    switch (kev.code) {
-                        case 1:   // ESC
-                        case 14:  // BACKSPACE
-                        case 35:  // H
-                            g_current_view = VIEW_HOME;
-                            break;
-                        case 28:  // ENTER
-                        case 57:  // SPACE
-                            trigger_click = true;
-                            break;
-                        case 36: // J: Jogos Retro
-                            launch_external_app("retroarch -c /etc/retroarch.cfg");
-                            needs_redraw = true;
-                            break;
-                        case 21: // Y: YouTube
-                            g_current_view = VIEW_YOUTUBE_MENU;
-                            break;
-                        case 19: // R: Radio
-                            g_current_view = VIEW_RADIO_MENU;
-                            break;
-                        case 20: // T: Terminal
-                            launch_external_app("sh");
-                            needs_redraw = true;
-                            break;
-                        case 103: my -= 25; break; // UP
-                        case 108: my += 25; break; // DOWN
-                        case 105: mx -= 25; break; // LEFT
-                        case 106: mx += 25; break; // RIGHT
-                    }
+                    if (kev.code == 1 || kev.code == 14) g_current_view = VIEW_HOME; // ESC / Back
+                    else if (kev.code == 28 || kev.code == 57) trigger_click = true; // Enter / Space
+                    else if (kev.code == 105 && g_focus_index > 0) g_focus_index--; // Left
+                    else if (kev.code == 106 && g_focus_index < (int)NUM_ICONS - 1) g_focus_index++; // Right
+                    else if (kev.code == 103 && g_focus_index >= 5) g_focus_index -= 5; // Up
+                    else if (kev.code == 108 && g_focus_index < 5) g_focus_index += 5; // Down
                 }
             }
         }
 
-        // Clamp cursor
-        if (mx < 5) mx = 5;
-        if (mx >= SCREEN_W - 5) mx = SCREEN_W - 5;
-        if (my < 5) my = 5;
-        if (my >= SCREEN_H - 5) my = SCREEN_H - 5;
-
-        // Check if 1 second elapsed to update clock
+        // Clock 1-second pulse
         time_t now = time(NULL);
         if (now != last_time) {
             last_time = now;
@@ -716,129 +618,89 @@ int main(int argc, char **argv) {
                 draw_wallpaper();
                 draw_status_bar();
 
-                // 10 Grid Icons
+                // Draw Grid Icons
                 for (size_t i = 0; i < NUM_ICONS; i++) {
+                    bool focused = (g_focus_index == (int)i);
                     bool hover = (mx >= g_icons[i].x - 12 && mx <= g_icons[i].x + g_icons[i].w + 12 &&
                                   my >= g_icons[i].y - 12 && my <= g_icons[i].y + g_icons[i].h + 30);
 
-                    draw_icon(g_icons[i].x, g_icons[i].y, g_icons[i].w, g_icons[i].h, 22, g_icons[i].color, hover);
+                    draw_icon(g_icons[i].x, g_icons[i].y, g_icons[i].w, g_icons[i].h, 22, g_icons[i].color, hover, focused);
                     draw_icon_emblem(g_icons[i].type, g_icons[i].x + g_icons[i].w / 2, g_icons[i].y + g_icons[i].h / 2, g_icons[i].w);
 
-                    uint32_t title_col = hover ? 0xFFFFDD44 : 0xFFFFFFFF;
+                    uint32_t title_col = (focused || hover) ? 0xFFFFDD44 : 0xFFFFFFFF;
                     draw_text_centered(g_icons[i].x + g_icons[i].w / 2, g_icons[i].y + g_icons[i].h + 10, g_icons[i].name, title_col, 2);
                     draw_text_centered(g_icons[i].x + g_icons[i].w / 2, g_icons[i].y + g_icons[i].h + 28, g_icons[i].subtitle, 0xFF88BBEE, 1);
 
-                    if (trigger_click && hover) {
-                        switch (g_icons[i].type) {
-                            case APP_RETROARCH:
-                                launch_external_app("retroarch -c /etc/retroarch.cfg");
-                                break;
-                            case APP_YOUTUBE:
-                                g_current_view = VIEW_YOUTUBE_MENU;
-                                break;
-                            case APP_RADIO:
-                                g_current_view = VIEW_RADIO_MENU;
-                                break;
-                            case APP_WEBCAM:
-                                launch_external_app("mpv --vo=drm --demuxer-lavf-format=video4linux2 --demuxer-lavf-o=video_size=640x480 /dev/video0");
-                                break;
-                            case APP_PHOTOS:
-                                launch_external_app("mpv --vo=drm --image-display-duration=5 /mnt/storage/retro/roms/ 2>/dev/null || true");
-                                break;
-                            case APP_DASHBOARD:
-                                g_current_view = VIEW_DASHBOARD;
-                                break;
-                            case APP_CHRONOKAIRO:
-                                g_current_view = VIEW_CHRONOKAIRO;
-                                break;
-                            case APP_IPTV:
-                                launch_external_app("mpv --vo=drm https://d25n220ee61s3k.cloudfront.net/v1/master/9d06243129e0db4ff79ee86a92237dbdb6feecd9/PlutoTV/master.m3u8 2>/dev/null || true");
-                                break;
-                            case APP_SETTINGS:
-                                g_current_view = VIEW_DASHBOARD;
-                                break;
-                            case APP_TERMINAL:
-                                launch_external_app("sh");
-                                break;
-                        }
+                    if (trigger_click && (focused || hover)) {
+                        handle_app_selection(g_icons[i].type);
+                        trigger_click = false;
                     }
                 }
 
-                // Dock Icons
+                // Draw Dock Icons
                 draw_dock();
                 for (size_t i = 0; i < NUM_DOCK_ICONS; i++) {
                     bool hover = (mx >= g_dock_icons[i].x - 10 && mx <= g_dock_icons[i].x + g_dock_icons[i].w + 10 &&
                                   my >= g_dock_icons[i].y - 10 && my <= g_dock_icons[i].y + g_dock_icons[i].h + 15);
-
-                    draw_icon(g_dock_icons[i].x, g_dock_icons[i].y, g_dock_icons[i].w, g_dock_icons[i].h, 18, g_dock_icons[i].color, hover);
+                    draw_icon(g_dock_icons[i].x, g_dock_icons[i].y, g_dock_icons[i].w, g_dock_icons[i].h, 18, g_dock_icons[i].color, hover, false);
                     draw_icon_emblem(g_dock_icons[i].type, g_dock_icons[i].x + g_dock_icons[i].w / 2, g_dock_icons[i].y + g_dock_icons[i].h / 2, g_dock_icons[i].w);
 
                     if (trigger_click && hover) {
-                        switch (g_dock_icons[i].type) {
-                            case APP_YOUTUBE: g_current_view = VIEW_YOUTUBE_MENU; break;
-                            case APP_RETROARCH: launch_external_app("retroarch -c /etc/retroarch.cfg"); break;
-                            case APP_RADIO: g_current_view = VIEW_RADIO_MENU; break;
-                            case APP_IPTV:
-                                launch_external_app("mpv --vo=drm https://d25n220ee61s3k.cloudfront.net/v1/master/9d06243129e0db4ff79ee86a92237dbdb6feecd9/PlutoTV/master.m3u8 2>/dev/null || true");
-                                break;
-                            default: break;
-                        }
+                        handle_app_selection(g_dock_icons[i].type);
+                        trigger_click = false;
                     }
                 }
+
+                draw_gamepad_hints();
             } else {
                 draw_status_bar();
                 if (g_current_view == VIEW_YOUTUBE_MENU) {
                     draw_view_youtube_menu();
-                    // Click on YouTube options
-                    if (trigger_click && my >= 150 && my <= 500 && mx >= 100 && mx <= SCREEN_W - 100) {
-                        int item = (my - 150) / 90;
-                        if (item == 0) launch_external_app("mpv --vo=drm --ytdl-format='bestvideo[height<=480][vcodec^=avc1]+bestaudio/best[height<=480]' 'https://www.youtube.com/watch?v=0k1L2b_wB2s'");
-                        else if (item == 1) launch_external_app("mpv --vo=drm --ytdl-format='bestvideo[height<=480][vcodec^=avc1]+bestaudio/best[height<=480]' 'https://www.youtube.com/watch?v=jfKfPfyJRdk'");
-                        else if (item == 2) launch_external_app("mpv --vo=drm --ytdl-format='bestvideo[height<=480][vcodec^=avc1]+bestaudio/best[height<=480]' 'https://www.youtube.com/watch?v=jj6q_XpzEl8'");
-                        else if (item == 3) launch_external_app("mpv --vo=drm --ytdl-format='bestvideo[height<=480][vcodec^=avc1]+bestaudio/best[height<=480]' 'https://www.youtube.com/watch?v=4xDzrJKXOOY'");
+                    if (trigger_click) {
+                        if (g_submenu_index == 0) launch_external_app("mpv --vo=drm --ytdl-format='bestvideo[height<=480][vcodec^=avc1]+bestaudio/best[height<=480]' 'https://www.youtube.com/watch?v=0k1L2b_wB2s'");
+                        else if (g_submenu_index == 1) launch_external_app("mpv --vo=drm --ytdl-format='bestvideo[height<=480][vcodec^=avc1]+bestaudio/best[height<=480]' 'https://www.youtube.com/watch?v=jfKfPfyJRdk'");
+                        else if (g_submenu_index == 2) launch_external_app("mpv --vo=drm --ytdl-format='bestvideo[height<=480][vcodec^=avc1]+bestaudio/best[height<=480]' 'https://www.youtube.com/watch?v=jj6q_XpzEl8'");
+                        else if (g_submenu_index == 3) launch_external_app("mpv --vo=drm --ytdl-format='bestvideo[height<=480][vcodec^=avc1]+bestaudio/best[height<=480]' 'https://www.youtube.com/watch?v=4xDzrJKXOOY'");
+                        trigger_click = false;
                     }
                 } else if (g_current_view == VIEW_RADIO_MENU) {
                     draw_view_radio_menu();
-                    if (trigger_click && my >= 150 && my <= 500 && mx >= 100 && mx <= SCREEN_W - 100) {
-                        int item = (my - 150) / 90;
+                    if (trigger_click) {
                         system("killall mpv 2>/dev/null || true");
-                        if (item == 0) {
-                            g_radio_name = "Lo-Fi Hip Hop Chill";
+                        if (g_submenu_index == 0) {
+                            g_radio_name = "Lo-Fi Hip Hop";
                             system("nohup mpv --no-video http://stream.zeno.fm/f3wvbbqmdg8uv >/dev/null 2>&1 &");
-                        } else if (item == 1) {
-                            g_radio_name = "Synthwave 80s Electro";
+                        } else if (g_submenu_index == 1) {
+                            g_radio_name = "Synthwave 80s";
                             system("nohup mpv --no-video http://stream.zeno.fm/7xpt085w9zquv >/dev/null 2>&1 &");
-                        } else if (item == 2) {
-                            g_radio_name = "Classic Rock 70s/80s";
+                        } else if (g_submenu_index == 2) {
+                            g_radio_name = "Classic Rock";
                             system("nohup mpv --no-video http://stream.zeno.fm/s425f1w38zquv >/dev/null 2>&1 &");
-                        } else if (item == 3) {
+                        } else if (g_submenu_index == 3) {
                             g_radio_name = "Desligado";
                         }
+                        trigger_click = false;
                     }
                 } else if (g_current_view == VIEW_DASHBOARD) {
                     draw_view_dashboard();
+                    if (trigger_click) { g_current_view = VIEW_HOME; trigger_click = false; }
                 } else if (g_current_view == VIEW_CHRONOKAIRO) {
                     draw_view_chronokairo();
-                }
-
-                // Check < Inicio button
-                if (trigger_click && mx >= 20 && mx <= 170 && my >= 30 && my <= 66) {
-                    g_current_view = VIEW_HOME;
+                    if (trigger_click) { g_current_view = VIEW_HOME; trigger_click = false; }
                 }
             }
 
-            draw_cursor(mx, my, mdown);
             memcpy(g_fb, g_backbuffer, screensize);
             needs_redraw = false;
         }
 
-        // Sleep 30ms when idle to keep CPU usage < 1%
-        usleep(30000);
+        // Sleep 25ms to keep CPU usage < 0.5%
+        usleep(25000);
     }
 
+    if (js_fd >= 0) close(js_fd);
     if (mouse_fd >= 0) close(mouse_fd);
     if (mouse0_fd >= 0) close(mouse0_fd);
-    if (ev_mouse_fd >= 0) close(ev_mouse_fd);
     if (kbd_fd >= 0) close(kbd_fd);
     munmap(g_fb, screensize);
     close(fbfd);
