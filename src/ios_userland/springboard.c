@@ -1,12 +1,15 @@
 /*
- * springboard.c - SnowPad OS Native SpringBoard & Touch Userland Engine
- * Renders the iconic iOS 3.2 (iPad 1) interface directly on Intel GMA 3150
- * at native 1360x768 on the external VGA monitor (LG TV).
+ * springboard.c - SnowPad OS Native SpringBoard & Touch Userland Engine (v2)
+ * Fullscreen 1360x768x32 UI for external VGA monitor (LG TV).
  *
- * Integrates:
- * - Framebuffer /dev/fb0 (32-bit ARGB8888)
- * - Trackpad /dev/input/mice -> GSEvent touches (touchshim)
- * - Status bar, Glass Dock, Icon Grid, Reflections, Circular Touch Cursor
+ * Features:
+ * - Disables Linux text cursor to eliminate terminal flicker
+ * - Authentic iOS 3.2 Linen gradient wallpaper
+ * - Status bar (Clock, Wi-Fi: LNET, IP, Battery)
+ * - 12 App Icons with bitmap text labels and gloss sheen
+ * - Glass Dock with 4 icons and perspective mirror reflection
+ * - Sleek iPadOS translucent touch pointer tracking trackpad in real time
+ * - Runs continuously in the background (60 FPS)
  */
 
 #include <stdio.h>
@@ -18,6 +21,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
+#include <signal.h>
 #include <time.h>
 #include <math.h>
 
@@ -26,18 +30,110 @@
 
 static uint32_t *g_fb = NULL;
 static uint32_t g_backbuffer[SCREEN_W * SCREEN_H];
+static volatile bool g_running = true;
 
-// Color definitions (0xAARRGGBB)
-#define COLOR_BLACK      0xFF000000
-#define COLOR_WHITE      0xFFFFFFFF
-#define COLOR_STATUS_BG  0xCC111116
-#define COLOR_DOCK_GLASS 0x40FFFFFF
-#define COLOR_CURSOR     0x803399FF
+// Basic 8x8 font bitmap (ASCII 32 to 126)
+static const uint8_t g_font8x8[95][8] = {
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00}, // 32 ' '
+    {0x18,0x3C,0x3C,0x18,0x18,0x00,0x18,0x00}, // 33 '!'
+    {0x66,0x66,0x24,0x00,0x00,0x00,0x00,0x00}, // 34 '"'
+    {0x6C,0x6C,0xFE,0x6C,0xFE,0x6C,0x6C,0x00}, // 35 '#'
+    {0x18,0x3E,0x60,0x3C,0x06,0x7C,0x18,0x00}, // 36 '$'
+    {0x00,0x63,0x66,0x0C,0x18,0x33,0x63,0x00}, // 37 '%'
+    {0x38,0x6C,0x38,0x76,0xDC,0xCC,0x76,0x00}, // 38 '&'
+    {0x18,0x18,0x30,0x00,0x00,0x00,0x00,0x00}, // 39 '''
+    {0x0C,0x18,0x30,0x30,0x30,0x18,0x0C,0x00}, // 40 '('
+    {0x30,0x18,0x0C,0x0C,0x0C,0x18,0x30,0x00}, // 41 ')'
+    {0x00,0x66,0x3C,0xFF,0x3C,0x66,0x00,0x00}, // 42 '*'
+    {0x00,0x18,0x18,0x7E,0x18,0x18,0x00,0x00}, // 43 '+'
+    {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x30}, // 44 ','
+    {0x00,0x00,0x00,0x7E,0x00,0x00,0x00,0x00}, // 45 '-'
+    {0x00,0x00,0x00,0x00,0x00,0x18,0x18,0x00}, // 46 '.'
+    {0x06,0x0C,0x18,0x30,0x60,0xC0,0x80,0x00}, // 47 '/'
+    {0x7C,0xC6,0xCE,0xD6,0xE6,0xC6,0x7C,0x00}, // 48 '0'
+    {0x18,0x38,0x18,0x18,0x18,0x18,0x7E,0x00}, // 49 '1'
+    {0x7C,0xC6,0x06,0x1C,0x30,0x66,0xFE,0x00}, // 50 '2'
+    {0x7C,0xC6,0x06,0x3C,0x06,0xC6,0x7C,0x00}, // 51 '3'
+    {0x1C,0x3C,0x6C,0xCC,0xFE,0x0C,0x1E,0x00}, // 52 '4'
+    {0xFE,0xC0,0xFC,0x06,0x06,0xC6,0x7C,0x00}, // 53 '5'
+    {0x7C,0xC6,0xC0,0xFC,0xC6,0xC6,0x7C,0x00}, // 54 '6'
+    {0xFE,0xC6,0x0C,0x18,0x30,0x30,0x30,0x00}, // 55 '7'
+    {0x7C,0xC6,0xC6,0x7C,0xC6,0xC6,0x7C,0x00}, // 56 '8'
+    {0x7C,0xC6,0xC6,0x7E,0x06,0xC6,0x7C,0x00}, // 57 '9'
+    {0x00,0x18,0x18,0x00,0x18,0x18,0x00,0x00}, // 58 ':'
+    {0x00,0x18,0x18,0x00,0x18,0x18,0x30,0x00}, // 59 ';'
+    {0x06,0x0C,0x18,0x30,0x18,0x0C,0x06,0x00}, // 60 '<'
+    {0x00,0x00,0x7E,0x00,0x7E,0x00,0x00,0x00}, // 61 '='
+    {0x60,0x30,0x18,0x0C,0x18,0x30,0x60,0x00}, // 62 '>'
+    {0x7C,0xC6,0x0C,0x18,0x18,0x00,0x18,0x00}, // 63 '?'
+    {0x7C,0xC6,0xDE,0xDE,0xDC,0xC0,0x7C,0x00}, // 64 '@'
+    {0x38,0x6C,0xC6,0xC6,0xFE,0xC6,0xC6,0x00}, // 65 'A'
+    {0xFC,0x66,0x66,0x7C,0x66,0x66,0xFC,0x00}, // 66 'B'
+    {0x3C,0x66,0xC0,0xC0,0xC0,0x66,0x3C,0x00}, // 67 'C'
+    {0xF8,0x6C,0x66,0x66,0x66,0x6C,0xF8,0x00}, // 68 'D'
+    {0xFE,0x62,0x68,0x78,0x68,0x62,0xFE,0x00}, // 69 'E'
+    {0xFE,0x62,0x68,0x78,0x68,0x60,0xF0,0x00}, // 70 'F'
+    {0x3C,0x66,0xC0,0xC0,0xCE,0x66,0x3E,0x00}, // 71 'G'
+    {0xC6,0xC6,0xC6,0xFE,0xC6,0xC6,0xC6,0x00}, // 72 'H'
+    {0x7E,0x18,0x18,0x18,0x18,0x18,0x7E,0x00}, // 73 'I'
+    {0x1E,0x0C,0x0C,0x0C,0xCC,0xCC,0x78,0x00}, // 74 'J'
+    {0xE6,0x66,0x6C,0x78,0x6C,0x66,0xE6,0x00}, // 75 'K'
+    {0xF0,0x60,0x60,0x60,0x62,0x66,0xFE,0x00}, // 76 'L'
+    {0xC6,0xEE,0xFE,0xD6,0xC6,0xC6,0xC6,0x00}, // 77 'M'
+    {0xC6,0xE6,0xF6,0xDE,0xCE,0xC6,0xC6,0x00}, // 78 'N'
+    {0x7C,0xC6,0xC6,0xC6,0xC6,0xC6,0x7C,0x00}, // 79 'O'
+    {0xFC,0x66,0x66,0x7C,0x60,0x60,0xF0,0x00}, // 80 'P'
+    {0x7C,0xC6,0xC6,0xC6,0xD6,0xDE,0x7C,0x0E}, // 81 'Q'
+    {0xFC,0x66,0x66,0x7C,0x6C,0x66,0xE6,0x00}, // 82 'R'
+    {0x7C,0xC6,0x60,0x38,0x0C,0xC6,0x7C,0x00}, // 83 'S'
+    {0x7E,0x5A,0x18,0x18,0x18,0x18,0x3C,0x00}, // 84 'T'
+    {0xC6,0xC6,0xC6,0xC6,0xC6,0xC6,0x7C,0x00}, // 85 'U'
+    {0xC6,0xC6,0xC6,0xC6,0x6C,0x38,0x10,0x00}, // 86 'V'
+    {0xC6,0xC6,0xD6,0xFE,0xEE,0xC6,0xC6,0x00}, // 87 'W'
+    {0xC6,0x6C,0x38,0x10,0x38,0x6C,0xC6,0x00}, // 88 'X'
+    {0x66,0x66,0x66,0x3C,0x18,0x18,0x3C,0x00}, // 89 'Y'
+    {0xFE,0xC6,0x8C,0x18,0x32,0x66,0xFE,0x00}, // 90 'Z'
+    {0x3C,0x30,0x30,0x30,0x30,0x30,0x3C,0x00}, // 91 '['
+    {0xC0,0x60,0x30,0x18,0x0C,0x06,0x02,0x00}, // 92 '\'
+    {0x3C,0x0C,0x0C,0x0C,0x0C,0x0C,0x3C,0x00}, // 93 ']'
+    {0x10,0x38,0x6C,0xC6,0x00,0x00,0x00,0x00}, // 94 '^'
+    {0x00,0x00,0x00,0x00,0x00,0x00,0x00,0xFF}, // 95 '_'
+    {0x30,0x18,0x0C,0x00,0x00,0x00,0x00,0x00}, // 96 '`'
+    {0x00,0x00,0x78,0x0C,0x7C,0xCC,0x76,0x00}, // 97 'a'
+    {0xE0,0x60,0x7C,0x66,0x66,0x66,0xDC,0x00}, // 98 'b'
+    {0x00,0x00,0x7C,0xC6,0xC0,0xC6,0x7C,0x00}, // 99 'c'
+    {0x1C,0x0C,0x7C,0xCC,0xCC,0xCC,0x76,0x00}, // 100 'd'
+    {0x00,0x00,0x7C,0xC6,0xFE,0xC0,0x7C,0x00}, // 101 'e'
+    {0x1C,0x36,0x30,0x78,0x30,0x30,0x78,0x00}, // 102 'f'
+    {0x00,0x00,0x76,0xCC,0xCC,0x7C,0x0C,0xF8}, // 103 'g'
+    {0xE0,0x60,0x6C,0x76,0x66,0x66,0xE6,0x00}, // 104 'h'
+    {0x18,0x00,0x38,0x18,0x18,0x18,0x3C,0x00}, // 105 'i'
+    {0x06,0x00,0x0E,0x06,0x06,0x66,0x66,0x3C}, // 106 'j'
+    {0xE0,0x60,0x66,0x6C,0x78,0x6C,0xE6,0x00}, // 107 'k'
+    {0x38,0x18,0x18,0x18,0x18,0x18,0x3C,0x00}, // 108 'l'
+    {0x00,0x00,0xEC,0xFE,0xD6,0xD6,0xD6,0x00}, // 109 'm'
+    {0x00,0x00,0xDC,0x66,0x66,0x66,0x66,0x00}, // 110 'n'
+    {0x00,0x00,0x7C,0xC6,0xC6,0xC6,0x7C,0x00}, // 111 'o'
+    {0x00,0x00,0xDC,0x66,0x66,0x7C,0x60,0xF0}, // 112 'p'
+    {0x00,0x00,0x76,0xCC,0xCC,0x7C,0x0C,0x1E}, // 113 'q'
+    {0x00,0x00,0xDC,0x76,0x60,0x60,0xF0,0x00}, // 114 'r'
+    {0x00,0x00,0x7E,0xC0,0x7C,0x06,0xFC,0x00}, // 115 's'
+    {0x30,0x30,0x7C,0x30,0x30,0x34,0x18,0x00}, // 116 't'
+    {0x00,0x00,0xCC,0xCC,0xCC,0xCC,0x76,0x00}, // 117 'u'
+    {0x00,0x00,0xC6,0xC6,0xC6,0x6C,0x38,0x00}, // 118 'v'
+    {0x00,0x00,0xC6,0xD6,0xD6,0xFE,0x6C,0x00}, // 119 'w'
+    {0x00,0x00,0xC6,0x6C,0x38,0x6C,0xC6,0x00}, // 120 'x'
+    {0x00,0x00,0xC6,0xC6,0xCE,0x76,0x06,0xFC}, // 121 'y'
+    {0x00,0x00,0xFE,0x9C,0x38,0x70,0xFE,0x00}, // 122 'z'
+    {0x0E,0x18,0x18,0x70,0x18,0x18,0x0E,0x00}, // 123 '{'
+    {0x18,0x18,0x18,0x00,0x18,0x18,0x18,0x00}, // 124 '|'
+    {0x70,0x18,0x18,0x0E,0x18,0x18,0x70,0x00}, // 125 '}'
+    {0x76,0xDC,0x00,0x00,0x00,0x00,0x00,0x00}, // 126 '~'
+};
 
 typedef struct {
     const char *name;
     uint32_t color;
-    const char *icon_symbol;
     int x;
     int y;
     int w;
@@ -45,32 +141,32 @@ typedef struct {
 } AppIcon;
 
 static AppIcon g_icons[] = {
-    {"Safari",      0xFF1C75BC, "W", 200, 160, 96, 96},
-    {"Musica",      0xFFE05A1F, "M", 380, 160, 96, 96},
-    {"Fotos",       0xFFE6B800, "P", 560, 160, 96, 96},
-    {"Videos",      0xFF5B6770, "V", 740, 160, 96, 96},
-    {"Notas",       0xFFE5A93C, "N", 920, 160, 96, 96},
-    {"Mapas",       0xFF2E8B57, "G", 1100, 160, 96, 96},
+    {"Safari",      0xFF1C75BC, 200, 140, 96, 96},
+    {"Musica",      0xFFE05A1F, 380, 140, 96, 96},
+    {"Fotos",       0xFFE6B800, 560, 140, 96, 96},
+    {"Videos",      0xFF5B6770, 740, 140, 96, 96},
+    {"Notas",       0xFFE5A93C, 920, 140, 96, 96},
+    {"Mapas",       0xFF2E8B57, 1100, 140, 96, 96},
 
-    {"Ajustes",     0xFF7F8C8D, "S", 200, 320, 96, 96},
-    {"Calculadora", 0xFF2C3E50, "C", 380, 320, 96, 96},
-    {"Relogio",     0xFF111111, "T", 560, 320, 96, 96},
-    {"Contatos",    0xFF8E44AD, "U", 740, 320, 96, 96},
-    {"Terminal",    0xFF003300, ">", 920, 320, 96, 96},
-    {"SnowPad",     0xFF007ACC, "*", 1100, 320, 96, 96},
+    {"Ajustes",     0xFF7F8C8D, 200, 310, 96, 96},
+    {"Calculadora", 0xFF2C3E50, 380, 310, 96, 96},
+    {"Relogio",     0xFF1A1A1A, 560, 310, 96, 96},
+    {"Contatos",    0xFF8E44AD, 740, 310, 96, 96},
+    {"Terminal",    0xFF0A3D1A, 920, 310, 96, 96},
+    {"SnowPad OS",  0xFF007ACC, 1100, 310, 96, 96},
 };
 #define NUM_ICONS (sizeof(g_icons)/sizeof(g_icons[0]))
 
 // Dock icons
 static AppIcon g_dock_icons[] = {
-    {"MobileSafari", 0xFF1C75BC, "W", 460, 640, 80, 80},
-    {"Mail",         0xFF2980B9, "@", 580, 640, 80, 80},
-    {"Fotos",        0xFFE6B800, "P", 700, 640, 80, 80},
-    {"iPod",         0xFFE05A1F, "M", 820, 640, 80, 80},
+    {"Safari", 0xFF1C75BC, 460, 630, 80, 80},
+    {"Mail",   0xFF2980B9, 580, 630, 80, 80},
+    {"Fotos",  0xFFE6B800, 700, 630, 80, 80},
+    {"iPod",   0xFFE05A1F, 820, 630, 80, 80},
 };
 #define NUM_DOCK_ICONS (sizeof(g_dock_icons)/sizeof(g_dock_icons[0]))
 
-// Alpha blend pixel src over dst
+// Alpha blend
 static inline uint32_t blend(uint32_t dst, uint32_t src) {
     uint32_t a = (src >> 24) & 0xFF;
     if (a == 0xFF) return src;
@@ -88,46 +184,82 @@ static inline void put_pixel(int x, int y, uint32_t color) {
     }
 }
 
-// Draw iOS 3.2 Classic Linen / Gradient Wallpaper
+// Draw string with scale
+void draw_text(int x0, int y0, const char *str, uint32_t color, int scale) {
+    while (*str) {
+        char ch = *str++;
+        if (ch >= 32 && ch <= 126) {
+            const uint8_t *glyph = g_font8x8[ch - 32];
+            for (int r = 0; r < 8; r++) {
+                uint8_t row = glyph[r];
+                for (int c = 0; c < 8; c++) {
+                    if (row & (1 << (7 - c))) {
+                        for (int sy = 0; sy < scale; sy++) {
+                            for (int sx = 0; sx < scale; sx++) {
+                                put_pixel(x0 + c * scale + sx, y0 + r * scale + sy, color);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        x0 += 8 * scale + 1;
+    }
+}
+
+// Draw text centered
+void draw_text_centered(int cx, int y0, const char *str, uint32_t color, int scale) {
+    int len = (int)strlen(str);
+    int w = len * (8 * scale + 1);
+    draw_text(cx - w / 2, y0, str, color, scale);
+}
+
+// Wallpaper: iOS 3.2 Deep Slate Gradient with subtle woven texture
 void draw_wallpaper() {
     for (int y = 0; y < SCREEN_H; y++) {
         float t = (float)y / (float)SCREEN_H;
-        // Deep iOS 3 Navy-Silver Gradient
-        uint8_t r = (uint8_t)(18 + t * 25);
-        uint8_t g = (uint8_t)(24 + t * 35);
-        uint8_t b = (uint8_t)(38 + t * 50);
-        uint32_t col = 0xFF000000 | (r << 16) | (g << 8) | b;
+        uint8_t r = (uint8_t)(16 + t * 20);
+        uint8_t g = (uint8_t)(22 + t * 30);
+        uint8_t b = (uint8_t)(36 + t * 44);
         for (int x = 0; x < SCREEN_W; x++) {
-            // Subtle linen texture
-            uint8_t noise = ((x ^ y) & 3) * 2;
-            uint32_t c = 0xFF000000 | ((r + noise) << 16) | ((g + noise) << 8) | (b + noise);
-            g_backbuffer[y * SCREEN_W + x] = c;
+            uint8_t grain = ((x ^ y) & 3) ? 2 : 0;
+            g_backbuffer[y * SCREEN_W + x] = 0xFF000000 | ((r + grain) << 16) | ((g + grain) << 8) | (b + grain);
         }
     }
 }
 
-// Draw Status Bar
+// Status Bar: Time, Wi-Fi, SnowPad OS indicator, Battery
 void draw_status_bar() {
-    for (int y = 0; y < 28; y++) {
+    for (int y = 0; y < 24; y++) {
         for (int x = 0; x < SCREEN_W; x++) {
-            put_pixel(x, y, 0xD0111622);
+            g_backbuffer[y * SCREEN_W + x] = 0xD010141C;
         }
     }
+    draw_text(16, 6, "iPad - SnowPad OS", 0xFFD0D8E8, 1);
+    draw_text(180, 6, "Wi-Fi: LNET (192.168.0.27)", 0xFF88BBEE, 1);
+
+    time_t now = time(NULL);
+    struct tm *tm = localtime(&now);
+    char time_str[16];
+    if (tm) snprintf(time_str, sizeof(time_str), "%02d:%02d", tm->tm_hour, tm->tm_min);
+    else strcpy(time_str, "14:30");
+
+    draw_text_centered(SCREEN_W / 2, 5, time_str, 0xFFFFFFFF, 2);
+    draw_text(SCREEN_W - 130, 6, "100% [====]", 0xFF66FF88, 1);
 }
 
-// Draw Rounded Rectangle (iOS app icon with gloss highlight)
-void draw_rounded_rect(int x0, int y0, int w, int h, int radius, uint32_t color) {
+// Draw rounded rect with glass reflection
+void draw_icon(int x0, int y0, int w, int h, int radius, uint32_t color) {
     for (int y = y0; y < y0 + h; y++) {
         for (int x = x0; x < x0 + w; x++) {
-            // Check corners
             int dx = (x < x0 + radius) ? (x0 + radius - x) : ((x >= x0 + w - radius) ? (x - (x0 + w - radius - 1)) : 0);
             int dy = (y < y0 + radius) ? (y0 + radius - y) : ((y >= y0 + h - radius) ? (y - (y0 + h - radius - 1)) : 0);
             if (dx * dx + dy * dy <= radius * radius) {
-                // Top half subtle gloss sheen (iOS 3 icon gloss effect)
                 uint32_t col = color;
+                // iOS 3 icon diagonal gloss curvature
                 if (y < y0 + h / 2) {
                     float gloss = 1.0f - (float)(y - y0) / (h / 2.0f);
-                    uint8_t a = (uint8_t)(gloss * 60);
+                    uint8_t a = (uint8_t)(gloss * 70);
                     col = blend(col, (a << 24) | 0x00FFFFFF);
                 }
                 put_pixel(x, y, col);
@@ -136,142 +268,136 @@ void draw_rounded_rect(int x0, int y0, int w, int h, int radius, uint32_t color)
     }
 }
 
-// Draw Glass Dock with Perspective Shelf
+// Draw Dock with 3D perspective glass shelf
 void draw_dock() {
-    int dock_y = 620;
-    int dock_h = 135;
+    int dock_y = 610;
+    int dock_h = 145;
     for (int y = dock_y; y < dock_y + dock_h; y++) {
         float t = (float)(y - dock_y) / (float)dock_h;
-        // Glass reflection gradient
-        uint8_t a = (uint8_t)(40 + (1.0f - t) * 80);
-        uint32_t glass_col = (a << 24) | 0x00E0E8F5;
-        for (int x = 160; x < SCREEN_W - 160; x++) {
-            put_pixel(x, y, glass_col);
+        uint8_t a = (uint8_t)(35 + (1.0f - t) * 75);
+        uint32_t glass = (a << 24) | 0x00C8D8E8;
+        for (int x = 200; x < SCREEN_W - 200; x++) {
+            put_pixel(x, y, glass);
         }
     }
-    // Dock glass rim line
-    for (int x = 160; x < SCREEN_W - 160; x++) {
-        put_pixel(x, dock_y, 0xA0FFFFFF);
-        put_pixel(x, dock_y + 1, 0x60FFFFFF);
+    // Frosted glass highlight line
+    for (int x = 200; x < SCREEN_W - 200; x++) {
+        put_pixel(x, dock_y, 0xB0FFFFFF);
+        put_pixel(x, dock_y + 1, 0x70FFFFFF);
     }
 }
 
-// Draw circular touch cursor (iPadOS pointer style)
+// Draw smooth iPadOS circular pointer
 void draw_cursor(int cx, int cy, bool is_down) {
-    int radius = is_down ? 18 : 22;
-    uint32_t col = is_down ? 0x9040A0FF : 0x70FFFFFF;
-    for (int y = cy - radius; y <= cy + radius; y++) {
-        for (int x = cx - radius; x <= cx + radius; x++) {
+    int r = is_down ? 16 : 20;
+    uint32_t fill = is_down ? 0x904090E0 : 0x60FFFFFF;
+    for (int y = cy - r; y <= cy + r; y++) {
+        for (int x = cx - r; x <= cx + r; x++) {
             int d2 = (x - cx) * (x - cx) + (y - cy) * (y - cy);
-            if (d2 <= radius * radius) {
-                // Border highlight
-                if (d2 >= (radius - 2) * (radius - 2)) {
-                    put_pixel(x, y, 0xD0FFFFFF);
+            if (d2 <= r * r) {
+                if (d2 >= (r - 2) * (r - 2)) {
+                    put_pixel(x, y, 0xD0FFFFFF); // Crisp border
                 } else {
-                    put_pixel(x, y, col);
+                    put_pixel(x, y, fill);
                 }
             }
         }
     }
 }
 
-void render_frame(int mouse_x, int mouse_y, bool mouse_down) {
-    // 1. Wallpaper
-    draw_wallpaper();
-
-    // 2. Status Bar
-    draw_status_bar();
-
-    // 3. Grid Icons
-    for (size_t i = 0; i < NUM_ICONS; i++) {
-        draw_rounded_rect(g_icons[i].x, g_icons[i].y, g_icons[i].w, g_icons[i].h, 18, g_icons[i].color);
-        // Simple inner badge
-        int cx = g_icons[i].x + g_icons[i].w / 2;
-        int cy = g_icons[i].y + g_icons[i].h / 2;
-        for (int py = cy - 10; py <= cy + 10; py++) {
-            for (int px = cx - 10; px <= cx + 10; px++) {
-                put_pixel(px, py, 0xDDFFFFFF);
-            }
-        }
-    }
-
-    // 4. Glass Dock & Dock Icons
-    draw_dock();
-    for (size_t i = 0; i < NUM_DOCK_ICONS; i++) {
-        draw_rounded_rect(g_dock_icons[i].x, g_dock_icons[i].y, g_dock_icons[i].w, g_dock_icons[i].h, 16, g_dock_icons[i].color);
-        int cx = g_dock_icons[i].x + g_dock_icons[i].w / 2;
-        int cy = g_dock_icons[i].y + g_dock_icons[i].h / 2;
-        for (int py = cy - 8; py <= cy + 8; py++) {
-            for (int px = cx - 8; px <= cx + 8; px++) {
-                put_pixel(px, py, 0xDDFFFFFF);
-            }
-        }
-    }
-
-    // 5. Circular Touch Pointer
-    draw_cursor(mouse_x, mouse_y, mouse_down);
-
-    // 6. Flip backbuffer to display fb0
-    memcpy(g_fb, g_backbuffer, SCREEN_W * SCREEN_H * sizeof(uint32_t));
+void sig_handler(int sig) {
+    (void)sig;
+    g_running = false;
 }
 
 int main(int argc, char **argv) {
-    printf("======================================================\n");
-    printf("  SnowPad OS - Native SpringBoard (Intel Atom N450)   \n");
-    printf("  Target Display: 1360x768x32 on LG TV (VGA)          \n");
-    printf("======================================================\n");
+    (void)argc; (void)argv;
+    signal(SIGTERM, sig_handler);
+    signal(SIGINT, sig_handler);
+
+    // 1. Disable blinking console text cursor on tty1
+    int tty_fd = open("/dev/tty1", O_RDWR);
+    if (tty_fd >= 0) {
+        write(tty_fd, "\033[?25l", 6); // Hide cursor escape code
+        close(tty_fd);
+    }
 
     int fbfd = open("/dev/fb0", O_RDWR);
     if (fbfd < 0) {
-        perror("[SPRINGBOARD] Error opening /dev/fb0");
+        perror("Error opening /dev/fb0");
         return 1;
     }
 
     size_t screensize = SCREEN_W * SCREEN_H * 4;
     g_fb = (uint32_t *)mmap(NULL, screensize, PROT_READ | PROT_WRITE, MAP_SHARED, fbfd, 0);
     if (g_fb == MAP_FAILED) {
-        perror("[SPRINGBOARD] Error mmapping framebuffer");
+        perror("Error mmap fb0");
         close(fbfd);
         return 1;
     }
 
     int mouse_fd = open("/dev/input/mice", O_RDONLY | O_NONBLOCK);
-    if (mouse_fd < 0) {
-        printf("[SPRINGBOARD] Notice: Trackpad /dev/input/mice not opened, using center cursor.\n");
-    }
 
-    printf("[SPRINGBOARD] Rendering iOS 3.2 SpringBoard UI on VGA...\n");
+    int mx = SCREEN_W / 2;
+    int my = SCREEN_H / 2;
+    bool mdown = false;
 
-    int mouse_x = SCREEN_W / 2;
-    int mouse_y = SCREEN_H / 2;
-    bool mouse_down = false;
+    printf("[SPRINGBOARD] Running continuous iOS 3.2 UI on VGA 1360x768...\n");
 
-    // Render initial SpringBoard screen
-    render_frame(mouse_x, mouse_y, mouse_down);
-    printf("[SPRINGBOARD] First frame rendered successfully on LG TV!\n");
-
-    // Event loop: run for 100 frames or while reading input
-    int frames = (argc > 1) ? atoi(argv[1]) : 120; // Default 120 frames (~4-5 seconds)
-    for (int f = 0; f < frames; f++) {
+    while (g_running) {
         if (mouse_fd >= 0) {
-            signed char buf[3];
-            int n = read(mouse_fd, buf, sizeof(buf));
+            signed char b[3];
+            int n = read(mouse_fd, b, sizeof(b));
             if (n > 0) {
-                mouse_down = (buf[0] & 1) != 0;
-                mouse_x += buf[1];
-                mouse_y -= buf[2];
-                if (mouse_x < 0) mouse_x = 0;
-                if (mouse_x >= SCREEN_W) mouse_x = SCREEN_W - 1;
-                if (mouse_y < 0) mouse_y = 0;
-                if (mouse_y >= SCREEN_H) mouse_y = SCREEN_H - 1;
+                mdown = (b[0] & 1) != 0;
+                mx += b[1];
+                my -= b[2];
+                if (mx < 10) mx = 10;
+                if (mx >= SCREEN_W - 10) mx = SCREEN_W - 10;
+                if (my < 30) my = 30;
+                if (my >= SCREEN_H - 10) my = SCREEN_H - 10;
             }
         }
-        render_frame(mouse_x, mouse_y, mouse_down);
-        usleep(33000); // ~30 FPS
+
+        // Render scene
+        draw_wallpaper();
+        draw_status_bar();
+
+        // App icons & text labels
+        for (size_t i = 0; i < NUM_ICONS; i++) {
+            draw_icon(g_icons[i].x, g_icons[i].y, g_icons[i].w, g_icons[i].h, 20, g_icons[i].color);
+            // Label with subtle drop shadow
+            draw_text_centered(g_icons[i].x + g_icons[i].w / 2, g_icons[i].y + g_icons[i].h + 10, g_icons[i].name, 0xA0000000, 1);
+            draw_text_centered(g_icons[i].x + g_icons[i].w / 2, g_icons[i].y + g_icons[i].h + 9, g_icons[i].name, 0xFFFFFFFF, 1);
+        }
+
+        // Dock & Dock Icons
+        draw_dock();
+        for (size_t i = 0; i < NUM_DOCK_ICONS; i++) {
+            draw_icon(g_dock_icons[i].x, g_dock_icons[i].y, g_dock_icons[i].w, g_dock_icons[i].h, 18, g_dock_icons[i].color);
+            // Inverted mirror reflection on glass
+            int ref_y = g_dock_icons[i].y + g_dock_icons[i].h + 4;
+            for (int ry = 0; ry < 24; ry++) {
+                uint8_t ref_alpha = (uint8_t)(45 * (1.0f - (float)ry / 24.0f));
+                uint32_t ref_col = (ref_alpha << 24) | (g_dock_icons[i].color & 0x00FFFFFF);
+                for (int rx = g_dock_icons[i].x + 4; rx < g_dock_icons[i].x + g_dock_icons[i].w - 4; rx++) {
+                    put_pixel(rx, ref_y + ry, ref_col);
+                }
+            }
+        }
+
+        // Pointer
+        draw_cursor(mx, my, mdown);
+
+        // Blit backbuffer
+        memcpy(g_fb, g_backbuffer, screensize);
+        usleep(16666); // ~60 FPS
     }
 
-    printf("[SPRINGBOARD] SpringBoard active and running on SnowPad volume!\n");
-
+    // Clean up: restore cursor
+    if (tty_fd >= 0) {
+        write(tty_fd, "\033[?25h", 6);
+    }
     if (mouse_fd >= 0) close(mouse_fd);
     munmap(g_fb, screensize);
     close(fbfd);
