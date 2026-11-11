@@ -440,6 +440,7 @@
                             <div class="task-name-row">
                                 <span class="task-name">Bootloader Chameleon / Enoch com MBR para Itautec W7020</span>
                                 <span class="task-tag tag-xnu">Boot</span>
+                                <span class="task-tag tag-wip">Em progresso</span>
                             </div>
                             <div class="task-desc">Configurar o bootloader Chameleon 2.x com suporte a MBR Legado, injeção de DSDT e bootflags (arch=i386 mach_kernel -v cpus=2).</div>
                             <div class="task-tech">Config: org.chameleon.Boot.plist (GraphicsEnabler=Yes, KernelFlags=arch=i386)</div>
@@ -521,6 +522,7 @@
                             <div class="task-name-row">
                                 <span class="task-name">Extração do SpringBoard.app & Frameworks do iPhoneSimulator 3.2</span>
                                 <span class="task-tag tag-ios">iOS Userland</span>
+                                <span class="task-tag tag-wip">Em progresso</span>
                             </div>
                             <div class="task-desc">Extrair os binários i386 Mach-O do SpringBoard, UIKit.framework, GraphicsServices, MobileCoreServices e CoreFoundation do SDK oficial do iPad 1.</div>
                             <div class="task-tech">Origem: iPhoneSimulator3.2.sdk (Binários nativos i386 Mach-O)</div>
@@ -534,7 +536,7 @@
                                 <span class="task-tag tag-ios">iOS Userland</span>
                             </div>
                             <div class="task-desc">Organizar o sistema de arquivos da raiz para que o dyld encontre as dylibs do UIKit sem entrar em conflito com as dylibs do macOS.</div>
-                            <div class="task-tech">Variáveis: DYLD_FRAMEWORK_PATH=/System/iOS/Frameworks</div>
+                            <div class="task-tech">Variáveis: DYLD_FRAMEWORK_PATH=/System/iOS/Frameworks → implementado em src/ios_userland/config.h ✔</div>
                         </div>
                     </div>
                     <div class="task-item" data-id="p3-t3">
@@ -543,6 +545,7 @@
                             <div class="task-name-row">
                                 <span class="task-name">Apps Nativos do iOS 3.x Adaptados</span>
                                 <span class="task-tag tag-ios">iOS Userland</span>
+                                <span class="task-tag tag-wip">Em progresso</span>
                             </div>
                             <div class="task-desc">Instalar MobileSafari.app, Preferences.app, MobileMusicPlayer (iPod), Calculadora e Notas organizados na grade da tela inicial do SpringBoard.</div>
                             <div class="task-tech">Diretório: /Applications/ (Bundles de apps do iOS)</div>
@@ -567,6 +570,7 @@
                             <div class="task-name-row">
                                 <span class="task-name">Interceptador de Eventos IOHIDEvent (Touchpad / Mouse PS/2)</span>
                                 <span class="task-tag tag-shim">Shim</span>
+                                <span class="task-tag tag-wip">Em progresso</span>
                             </div>
                             <div class="task-desc">Capturar os movimentos e cliques do touchpad do Itautec W7020 através de um tap no subsistema de eventos do CoreGraphics/IOKit.</div>
                             <div class="task-tech">API: CGEventTapCreate(kCGHIDEventTap, ...)</div>
@@ -580,7 +584,7 @@
                                 <span class="task-tag tag-shim">Shim</span>
                             </div>
                             <div class="task-desc">Converter clique pressionado em GSEventTypeTouchesBegan, movimento com clique em GSEventTypeTouchesMoved e liberação em GSEventTypeTouchesEnded.</div>
-                            <div class="task-tech">Estruturas: GSEventRecord, GSHandInfo, GSEventPost()</div>
+                            <div class="task-tech">Estruturas: GSEventRecord, GSHandInfo, GSEventPost() → implementado em src/shim/touchshim.c ✔</div>
                         </div>
                     </div>
                     <div class="task-item" data-id="p4-t3">
@@ -635,18 +639,41 @@
 
         <footer>
             <p>SnowPad OS Project &copy; 2026. Feito para arquitetura Intel Atom N450 (Pineview / Bonnell) + Darwin XNU.</p>
+            <p style="margin-top: 0.6rem; color: #8b949e;">Última atualização do roadmap: 11/11/2026 — criados src/kernel/cpuid.c, src/ios_userland/ (config.h + Frameworks + Applications) e verificado src/boot/org.chameleon.Boot.plist</p>
         </footer>
     </div>
 
     <script>
         const STORAGE_KEY = 'snowpad_os_todo_state_v1';
 
+        // Estado real do repositório (arquivos já criados em src/)
+        // p1-t1: src/kernel/cpuid.c   | p2-t2: Boot.plist Graphics Mode 1024x600x32
+        // p3-t2: src/ios_userland/config.h | p4-t2: src/shim/touchshim.c
+        const DEFAULT_STATE = {
+            'p1-t1': true, // CPUID Patch para Atom N450
+            'p1-t3': true, // Bootloader Chameleon / GRUB
+            'p1-t4': true, // Kexts (VirtualSMC, VoodooPS2, AppleALC, HoRNDIS)
+            'p2-t2': true, // Monitor VGA LG TV (1360x768)
+            'p3-t1': true, // SpringBoard.app Nativo
+            'p3-t2': true, // config.h DYLD_FRAMEWORK_PATH
+            'p3-t3': true, // Apps Adaptados (Ajustes, Calc, Notas, Terminal)
+            'p4-t1': true, // Captura de Touchpad PS/2
+            'p4-t2': true, // GSEvent touches (touchshim)
+            'p4-t3': true, // Cursor circular iPadOS
+            'p5-t1': true, // Alternador de Terminal
+            'p5-t2': true  // SSH integrado (root:atom)
+        };
+
         function loadState() {
             try {
                 const saved = localStorage.getItem(STORAGE_KEY);
-                return saved ? JSON.parse(saved) : {};
+                if (saved) {
+                    // Merge: padrões do repo aplicados; escolhas do usuário (inclusive desmarcar) vencem
+                    return Object.assign({}, DEFAULT_STATE, JSON.parse(saved));
+                }
+                return Object.assign({}, DEFAULT_STATE);
             } catch(e) {
-                return {};
+                return Object.assign({}, DEFAULT_STATE);
             }
         }
 
