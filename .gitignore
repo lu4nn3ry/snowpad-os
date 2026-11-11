@@ -1,0 +1,13 @@
+# Build outputs
+build/
+bin/
+*.o
+*.dylib
+*.kext
+*.iso
+*.dmg
+.DS_Store
+
+# Local Credentials
+.env
+*.env
