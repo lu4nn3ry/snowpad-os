@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>SMbiosversion</key>
+    <string>MBA21.88Z.0051.B00.0809221100</string>
+    <key>SMboardproduct</key>
+    <string>Mac-F42C8CC8</string>
+    <key>SMfamily</key>
+    <string>MacBook Air</string>
+    <key>SMmanufacturer</key>
+    <string>Apple Inc.</string>
+    <key>SMproductname</key>
+    <string>MacBookAir2,1</string>
+    <key>SMserial</key>
+    <string>W89123459AU</string>
+    <key>SMsystemversion</key>
+    <string>1.0</string>
+    <key>SMcputype</key>
+    <string>0x0201</string>
+    <key>SMbusspeed</key>
+    <string>667</string>
+    <key>SMmemspeed</key>
+    <string>667</string>
+    <key>SMmemtype</key>
+    <string>19</string>
+</dict>
+</plist>
