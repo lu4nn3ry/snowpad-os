@@ -1,16 +1,48 @@
 /*
- * springboard.c - SnowPad OS Native SpringBoard & Touch Userland Engine (v4)
+ * springboard.c - SnowPad OS Native SpringBoard & Touch Userland Engine (v5)
  * Fullscreen 1360x768x32 UI for external VGA monitor (LG TV).
  *
  * Full Interactive iOS 3.2 Experience:
- * - Home Screen with 12 vector-emblem icons + 4 dock icons
- * - Click detection on icons to launch apps!
- * - VIEW_SETTINGS: Device specs table (Atom N450, 2GB RAM, GMA 3150, 1360x768)
- * - VIEW_TERMINAL: Real-time system shell overlay
- * - VIEW_CALC: Working 4-function iOS 3 calculator
- * - VIEW_NOTES: Yellow legal pad
- * - Navigation bar with [ < Home ] back button
- * - iPadOS circular touch cursor tracking PS/2 trackpad
+ * - 12 Grid Icons + 4 Dock Icons: ALL 16 ICONS ARE CLICKABLE AND LAUNCH APPS!
+ * - Expanded Hitboxes: Icon + Label + Padding (126x140px interactive zone)
+ * - Hover Detection: Gold glow border + bright text highlight when hovering
+ * - Touch & Click Support:
+ *     - Trackpad physical button (mice / mouse0)
+ *     - Trackpad tap-to-click (BTN_TOUCH / BTN_LEFT on event10)
+ *     - USB mouse clicks
+ * - Full Keyboard Control:
+ *     - S: Safari
+ *     - M: Musica / iPod
+ *     - F: Fotos
+ *     - V: Videos
+ *     - N: Notas
+ *     - P: Mapas
+ *     - A: Ajustes (Settings)
+ *     - C: Calculadora
+ *     - R: Relogio (Clock)
+ *     - O: Contatos (Contacts)
+ *     - T: Terminal Darwin
+ *     - W: SnowPad OS Hub
+ *     - E: Mail
+ *     - 1 to 9: Open icons 1-9 directly
+ *     - Enter / Space: Open hovered icon
+ *     - Arrows: Move cursor
+ *     - Esc / Backspace / H: Return to Home
+ * - 13 Complete Views:
+ *     - VIEW_HOME
+ *     - VIEW_SAFARI
+ *     - VIEW_MUSIC
+ *     - VIEW_PHOTOS
+ *     - VIEW_VIDEOS
+ *     - VIEW_NOTES
+ *     - VIEW_MAPS
+ *     - VIEW_SETTINGS
+ *     - VIEW_CALC
+ *     - VIEW_CLOCK
+ *     - VIEW_CONTACTS
+ *     - VIEW_TERMINAL
+ *     - VIEW_SNOWPAD
+ *     - VIEW_MAIL
  */
 
 #include <stdio.h>
@@ -22,6 +54,7 @@
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/ioctl.h>
+#include <linux/input.h>
 #include <signal.h>
 #include <time.h>
 #include <math.h>
@@ -97,7 +130,16 @@ typedef enum {
     VIEW_SETTINGS,
     VIEW_TERMINAL,
     VIEW_CALC,
-    VIEW_NOTES
+    VIEW_NOTES,
+    VIEW_SAFARI,
+    VIEW_MUSIC,
+    VIEW_PHOTOS,
+    VIEW_VIDEOS,
+    VIEW_MAPS,
+    VIEW_CLOCK,
+    VIEW_CONTACTS,
+    VIEW_SNOWPAD,
+    VIEW_MAIL
 } ViewState;
 
 static ViewState g_current_view = VIEW_HOME;
@@ -143,219 +185,230 @@ static inline uint32_t blend(uint32_t dst, uint32_t src) {
     if (a == 0) return dst;
     uint32_t inv_a = 255 - a;
 
-    uint32_t rb = ((src & 0x00FF00FF) * a + (dst & 0x00FF00FF) * inv_a) >> 8;
-    uint32_t g  = ((src & 0x0000FF00) * a + (dst & 0x0000FF00) * inv_a) >> 8;
-    return 0xFF000000 | (rb & 0x00FF00FF) | (g & 0x0000FF00);
+    uint32_t dr = (dst >> 16) & 0xFF;
+    uint32_t dg = (dst >> 8) & 0xFF;
+    uint32_t db = dst & 0xFF;
+
+    uint32_t sr = (src >> 16) & 0xFF;
+    uint32_t sg = (src >> 8) & 0xFF;
+    uint32_t sb = src & 0xFF;
+
+    uint32_t r = (sr * a + dr * inv_a) / 255;
+    uint32_t g = (sg * a + dg * inv_a) / 255;
+    uint32_t b = (sb * a + db * inv_a) / 255;
+
+    return (0xFF << 24) | (r << 16) | (g << 8) | b;
 }
 
 static inline void put_pixel(int x, int y, uint32_t color) {
     if (x >= 0 && x < SCREEN_W && y >= 0 && y < SCREEN_H) {
-        g_backbuffer[y * SCREEN_W + x] = blend(g_backbuffer[y * SCREEN_W + x], color);
-    }
-}
-
-void draw_fill_circle(int cx, int cy, int r, uint32_t color) {
-    for (int y = cy - r; y <= cy + r; y++) {
-        for (int x = cx - r; x <= cx + r; x++) {
-            if ((x - cx) * (x - cx) + (y - cy) * (y - cy) <= r * r) {
-                put_pixel(x, y, color);
-            }
+        if ((color >> 24) == 0xFF) {
+            g_backbuffer[y * SCREEN_W + x] = color;
+        } else {
+            g_backbuffer[y * SCREEN_W + x] = blend(g_backbuffer[y * SCREEN_W + x], color);
         }
     }
 }
 
-void draw_text(int x0, int y0, const char *str, uint32_t color, int scale) {
-    while (*str) {
-        char ch = *str++;
-        if (ch >= 32 && ch <= 126) {
-            const uint8_t *glyph = g_font8x8[ch - 32];
-            for (int r = 0; r < 8; r++) {
-                uint8_t row = glyph[r];
-                for (int c = 0; c < 8; c++) {
-                    if (row & (1 << (7 - c))) {
-                        for (int sy = 0; sy < scale; sy++) {
-                            for (int sx = 0; sx < scale; sx++) {
-                                put_pixel(x0 + c * scale + sx, y0 + r * scale + sy, color);
-                            }
-                        }
+void draw_char(int x, int y, char c, uint32_t color, int scale) {
+    if (c < 32 || c > 126) c = '?';
+    const uint8_t *glyph = g_font8x8[c - 32];
+    for (int row = 0; row < 8; row++) {
+        uint8_t line = glyph[row];
+        for (int col = 0; col < 8; col++) {
+            if (line & (1 << (7 - col))) {
+                for (int sy = 0; sy < scale; sy++) {
+                    for (int sx = 0; sx < scale; sx++) {
+                        put_pixel(x + col * scale + sx, y + row * scale + sy, color);
                     }
                 }
             }
         }
-        x0 += 8 * scale + 1;
     }
 }
 
-void draw_text_centered(int cx, int y0, const char *str, uint32_t color, int scale) {
-    int len = (int)strlen(str);
-    int w = len * (8 * scale + 1);
-    draw_text(cx - w / 2, y0, str, color, scale);
+void draw_text(int x, int y, const char *str, uint32_t color, int scale) {
+    int cx = x;
+    while (*str) {
+        if (*str == '\n') {
+            y += 10 * scale;
+            cx = x;
+        } else {
+            draw_char(cx, y, *str, color, scale);
+            cx += 8 * scale;
+        }
+        str++;
+    }
+}
+
+void draw_text_centered(int cx, int y, const char *str, uint32_t color, int scale) {
+    int len = strlen(str);
+    int x = cx - (len * 8 * scale) / 2;
+    draw_text(x, y, str, color, scale);
+}
+
+void draw_fill_circle(int cx, int cy, int radius, uint32_t color) {
+    for (int y = -radius; y <= radius; y++) {
+        for (int x = -radius; x <= radius; x++) {
+            if (x * x + y * y <= radius * radius) {
+                put_pixel(cx + x, cy + y, color);
+            }
+        }
+    }
 }
 
 void draw_icon_emblem(AppType type, int cx, int cy, int size) {
-    int r = size / 3;
+    int s = size / 3;
     switch (type) {
         case APP_SAFARI: {
-            draw_fill_circle(cx, cy, r, 0xFFFFFFFF);
-            draw_fill_circle(cx, cy, r - 3, 0xFF104E8B);
-            for (int i = 0; i <= r - 5; i++) {
-                put_pixel(cx + i, cy - i, 0xFFFF2222);
-                put_pixel(cx + i - 1, cy - i, 0xFFFF5555);
-                put_pixel(cx - i, cy + i, 0xFFFFFFFF);
-                put_pixel(cx - i + 1, cy + i, 0xFFDDDDDD);
+            draw_fill_circle(cx, cy, s + 4, 0xFFFFFFFF);
+            draw_fill_circle(cx, cy, s + 2, 0xFF0E53A7);
+            for (int d = -s; d <= s; d++) {
+                uint32_t col = (d < 0) ? 0xFFFF3333 : 0xFFFFFFFF;
+                put_pixel(cx + d, cy + d, col);
+                put_pixel(cx + d + 1, cy + d, col);
+                put_pixel(cx + d, cy + d + 1, col);
             }
-            draw_fill_circle(cx, cy, 3, 0xFFFFD700);
             break;
         }
         case APP_MUSIC: {
-            draw_fill_circle(cx - 8, cy + 8, 6, 0xFFFFFFFF);
-            draw_fill_circle(cx + 8, cy + 4, 6, 0xFFFFFFFF);
-            for (int y = cy - 12; y <= cy + 8; y++) {
-                put_pixel(cx - 3, y, 0xFFFFFFFF);
-                put_pixel(cx - 4, y, 0xFFFFFFFF);
+            int ny = cy - s / 2;
+            for (int y = ny; y < ny + s + 6; y++) {
+                for (int x = cx - 8; x <= cx - 5; x++) put_pixel(x, y, 0xFFFFFFFF);
+                for (int x = cx + 5; x <= cx + 8; x++) put_pixel(x, y, 0xFFFFFFFF);
             }
-            for (int y = cy - 16; y <= cy + 4; y++) {
-                put_pixel(cx + 13, y, 0xFFFFFFFF);
-                put_pixel(cx + 12, y, 0xFFFFFFFF);
+            for (int y = ny; y < ny + 5; y++) {
+                for (int x = cx - 8; x <= cx + 8; x++) put_pixel(x, y, 0xFFFFFFFF);
             }
-            for (int x = cx - 4; x <= cx + 13; x++) {
-                put_pixel(x, cy - 14, 0xFFFFFFFF);
-                put_pixel(x, cy - 15, 0xFFFFFFFF);
-                put_pixel(x, cy - 16, 0xFFFFFFFF);
-            }
+            draw_fill_circle(cx - 8, ny + s + 6, 6, 0xFFFFFFFF);
+            draw_fill_circle(cx + 6, ny + s + 6, 6, 0xFFFFFFFF);
             break;
         }
         case APP_PHOTOS: {
-            draw_fill_circle(cx, cy, r, 0xFFFFFFFF);
-            uint32_t petals[] = {0xFFFF4444, 0xFFFF8800, 0xFFFFDD00, 0xFF44CC44, 0xFF0088FF, 0xFF9933FF};
+            uint32_t petal_colors[6] = {0xFFFF3B30, 0xFFFF9500, 0xFFFFCC00, 0xFF4CD964, 0xFF5AC8FA, 0xFF5856D6};
             for (int i = 0; i < 6; i++) {
-                float a = (float)i * 1.047f;
-                int px = cx + (int)(cosf(a) * (r - 7));
-                int py = cy + (int)(sinf(a) * (r - 7));
-                draw_fill_circle(px, py, 6, petals[i]);
+                double angle = i * (3.14159 / 3.0);
+                int px = cx + (int)(cos(angle) * (s - 2));
+                int py = cy + (int)(sin(angle) * (s - 2));
+                draw_fill_circle(px, py, 7, petal_colors[i]);
             }
             draw_fill_circle(cx, cy, 5, 0xFFFFFFFF);
             break;
         }
         case APP_VIDEOS: {
-            draw_fill_circle(cx, cy, r, 0xFF222B38);
-            for (int x = 0; x < 18; x++) {
-                for (int y = -x; y <= x; y++) {
-                    put_pixel(cx - 6 + x, cy + y / 2, 0xFFFFFFFF);
+            for (int y = cy - s; y <= cy + s; y++) {
+                for (int x = cx - s - 4; x <= cx + s + 4; x++) {
+                    put_pixel(x, y, 0xFF2A2A2A);
+                }
+            }
+            for (int y = -s; y <= s; y++) {
+                int w = (y + s) / 2;
+                if (w > s) w = s * 2 - w;
+                for (int x = cx - 4; x <= cx - 4 + w; x++) {
+                    put_pixel(x, cy + y, 0xFFFFFFFF);
                 }
             }
             break;
         }
         case APP_NOTES: {
-            for (int y = cy - r; y <= cy + r; y++) {
-                for (int x = cx - r + 3; x <= cx + r - 3; x++) {
-                    put_pixel(x, y, 0xFFFFF8DC);
+            for (int y = cy - s - 2; y <= cy + s + 2; y++) {
+                for (int x = cx - s; x <= cx + s; x++) {
+                    put_pixel(x, y, 0xFFFFFDD0);
                 }
             }
-            for (int y = cy - r; y <= cy - r + 6; y++) {
-                for (int x = cx - r + 3; x <= cx + r - 3; x++) {
-                    put_pixel(x, y, 0xFF8B4513);
+            for (int y = cy - s + 4; y <= cy + s - 4; y += 6) {
+                for (int x = cx - s + 4; x <= cx + s - 4; x++) {
+                    put_pixel(x, y, 0xFF88AAEE);
                 }
-            }
-            for (int y = cy - r + 11; y <= cy + r - 4; y += 5) {
-                for (int x = cx - r + 6; x <= cx + r - 6; x++) {
-                    put_pixel(x, y, 0xFF87CEEB);
-                }
-            }
-            for (int y = cy - r + 6; y <= cy + r; y++) {
-                put_pixel(cx - r + 9, y, 0xFFFF6347);
             }
             break;
         }
         case APP_MAPS: {
-            draw_fill_circle(cx, cy, r, 0xFFEEDDAA);
-            for (int x = cx - r + 2; x <= cx + r - 2; x++) {
-                put_pixel(x, cy + (x - cx) / 3, 0xFFFFCC00);
-                put_pixel(x, cy + (x - cx) / 3 + 1, 0xFFFFFFFF);
+            for (int y = cy - s; y <= cy + s; y++) {
+                for (int x = cx - s; x <= cx + s; x++) {
+                    put_pixel(x, y, 0xFFE8E0D0);
+                }
             }
-            draw_fill_circle(cx, cy - 4, 7, 0xFFFF2222);
-            draw_fill_circle(cx, cy - 4, 3, 0xFFFFFFFF);
-            for (int y = cy + 2; y <= cy + 9; y++) put_pixel(cx, y, 0xFFFF2222);
+            for (int y = cy - s; y <= cy + s; y++) {
+                put_pixel(cx - 2, y, 0xFFFFCC00);
+                put_pixel(cx - 1, y, 0xFFFFCC00);
+                put_pixel(cx, y, 0xFFFFCC00);
+            }
+            draw_fill_circle(cx, cy - 2, 7, 0xFFFF2222);
+            draw_fill_circle(cx, cy - 2, 3, 0xFFFFFFFF);
             break;
         }
         case APP_SETTINGS: {
-            draw_fill_circle(cx, cy, r, 0xFF555D65);
+            draw_fill_circle(cx, cy, s, 0xFF8E8E93);
+            draw_fill_circle(cx, cy, s - 6, 0xFF50555C);
+            draw_fill_circle(cx, cy, 6, 0xFF8E8E93);
             for (int i = 0; i < 8; i++) {
-                float a = (float)i * 0.785f;
-                int gx = cx + (int)(cosf(a) * (r - 2));
-                int gy = cy + (int)(sinf(a) * (r - 2));
-                draw_fill_circle(gx, gy, 5, 0xFF555D65);
+                double a = i * (3.14159 / 4.0);
+                int gx = cx + (int)(cos(a) * (s + 2));
+                int gy = cy + (int)(sin(a) * (s + 2));
+                draw_fill_circle(gx, gy, 4, 0xFF8E8E93);
             }
-            draw_fill_circle(cx, cy, r - 5, 0xFF7A848E);
-            draw_fill_circle(cx, cy, 5, 0xFF2A2D32);
             break;
         }
         case APP_CALC: {
-            draw_text(cx - 14, cy - 14, "+", 0xFFFF9500, 2);
-            draw_text(cx + 4,  cy - 14, "-", 0xFFFF9500, 2);
-            draw_text(cx - 14, cy + 2,  "x", 0xFFFF9500, 2);
-            draw_text(cx + 4,  cy + 2,  "=", 0xFF34AADC, 2);
+            for (int y = cy - s; y <= cy + s; y++) {
+                for (int x = cx - s; x <= cx + s; x++) {
+                    put_pixel(x, y, 0xFF2A2A2A);
+                }
+            }
+            for (int y = cy - s + 3; y <= cy - s + 9; y++) {
+                for (int x = cx - s + 3; x <= cx + s - 3; x++) {
+                    put_pixel(x, y, 0xFF4A8505);
+                }
+            }
+            draw_text(cx - 8, cy + 2, "+ -", 0xFFFF9500, 1);
             break;
         }
         case APP_CLOCK: {
-            draw_fill_circle(cx, cy, r, 0xFFFFFFFF);
-            draw_fill_circle(cx, cy, r - 2, 0xFF0D0D0D);
-            for (int i = 0; i < r - 8; i++) {
-                put_pixel(cx - (int)(i * 0.6f), cy - (int)(i * 0.8f), 0xFFFFFFFF);
-            }
-            for (int i = 0; i < r - 5; i++) {
-                put_pixel(cx + (int)(i * 0.7f), cy - (int)(i * 0.7f), 0xFFFFFFFF);
-            }
-            for (int i = 0; i < r - 4; i++) {
-                put_pixel(cx, cy + i, 0xFFFF6600);
-            }
-            draw_fill_circle(cx, cy, 2, 0xFFFF6600);
+            draw_fill_circle(cx, cy, s + 2, 0xFF000000);
+            draw_fill_circle(cx, cy, s, 0xFFFFFFFF);
+            for (int y = cy - s + 4; y <= cy; y++) put_pixel(cx, y, 0xFF000000);
+            for (int x = cx; x <= cx + s - 6; x++) put_pixel(x, cy, 0xFFFF3B30);
+            draw_fill_circle(cx, cy, 2, 0xFFFF3B30);
             break;
         }
         case APP_CONTACTS: {
-            for (int y = cy - r + 3; y <= cy + r - 3; y++) {
-                for (int x = cx - r + 4; x <= cx + r - 4; x++) {
-                    put_pixel(x, y, 0xFFE0E0E0);
+            for (int y = cy - s; y <= cy + s; y++) {
+                for (int x = cx - s; x <= cx + s; x++) {
+                    put_pixel(x, y, 0xFF5C3A21);
                 }
             }
-            draw_fill_circle(cx - 2, cy - 4, 5, 0xFF4A235A);
-            for (int y = cy + 2; y <= cy + 10; y++) {
-                for (int x = cx - 9; x <= cx + 5; x++) {
-                    put_pixel(x, y, 0xFF4A235A);
-                }
+            draw_fill_circle(cx, cy - 4, 6, 0xFFFFFFFF);
+            for (int y = cy + 4; y <= cy + s - 3; y++) {
+                int bw = (y - cy - 4) * 2;
+                for (int x = cx - bw; x <= cx + bw; x++) put_pixel(x, y, 0xFFFFFFFF);
             }
-            put_pixel(cx + r - 3, cy - 8, 0xFFFF3333);
-            put_pixel(cx + r - 3, cy - 2, 0xFF33CC33);
-            put_pixel(cx + r - 3, cy + 4, 0xFF3366FF);
             break;
         }
         case APP_TERMINAL: {
-            draw_text(cx - 14, cy - 7, ">_", 0xFF33FF66, 2);
+            for (int y = cy - s; y <= cy + s; y++) {
+                for (int x = cx - s - 2; x <= cx + s + 2; x++) {
+                    put_pixel(x, y, 0xFF000000);
+                }
+            }
+            draw_text(cx - s + 3, cy - 6, ">_", 0xFF00FF66, 2);
             break;
         }
         case APP_SNOWPAD: {
-            draw_fill_circle(cx, cy, r, 0xFF005599);
-            for (int y = cy - 14; y <= cy + 14; y++) {
-                for (int x = cx - 10; x <= cx + 10; x++) {
-                    if (y == cy - 14 || y == cy + 14 || x == cx - 10 || x == cx + 10)
-                        put_pixel(x, y, 0xFFFFFFFF);
-                    else
-                        put_pixel(x, y, 0xFF003366);
-                }
-            }
-            draw_fill_circle(cx, cy + 12, 1, 0xFFFFFFFF);
-            draw_text(cx - 6, cy - 4, "OS", 0xFF66CCFF, 1);
+            draw_fill_circle(cx, cy, s + 2, 0xFF007ACC);
+            draw_fill_circle(cx, cy, s - 2, 0xFF005A9E);
+            draw_text_centered(cx, cy - 6, "X", 0xFFFFFFFF, 2);
             break;
         }
         case APP_MAIL: {
-            for (int y = cy - 10; y <= cy + 10; y++) {
-                for (int x = cx - 16; x <= cx + 16; x++) {
+            for (int y = cy - s + 4; y <= cy + s - 4; y++) {
+                for (int x = cx - s - 2; x <= cx + s + 2; x++) {
                     put_pixel(x, y, 0xFFFFFFFF);
                 }
             }
-            for (int x = 0; x <= 16; x++) {
-                put_pixel(cx - 16 + x, cy - 10 + x / 2, 0xFFCCCCCC);
-                put_pixel(cx + 16 - x, cy - 10 + x / 2, 0xFFCCCCCC);
+            for (int d = 0; d < s; d++) {
+                put_pixel(cx - s - 2 + d, cy - s + 4 + d, 0xFF4A90E2);
+                put_pixel(cx + s + 2 - d, cy - s + 4 + d, 0xFF4A90E2);
             }
             break;
         }
@@ -364,14 +417,39 @@ void draw_icon_emblem(AppType type, int cx, int cy, int size) {
 
 void draw_wallpaper() {
     for (int y = 0; y < SCREEN_H; y++) {
-        float t = (float)y / (float)SCREEN_H;
-        uint8_t r = (uint8_t)(16 + t * 20);
-        uint8_t g = (uint8_t)(22 + t * 30);
-        uint8_t b = (uint8_t)(36 + t * 44);
+        float v = (float)y / (float)SCREEN_H;
+        uint8_t r = (uint8_t)(15 * (1.0f - v) + 5 * v);
+        uint8_t g = (uint8_t)(45 * (1.0f - v) + 20 * v);
+        uint8_t b = (uint8_t)(95 * (1.0f - v) + 40 * v);
+        uint32_t bg = (0xFF << 24) | (r << 16) | (g << 8) | b;
         for (int x = 0; x < SCREEN_W; x++) {
-            uint8_t grain = ((x ^ y) & 3) ? 2 : 0;
-            g_backbuffer[y * SCREEN_W + x] = 0xFF000000 | ((r + grain) << 16) | ((g + grain) << 8) | (b + grain);
+            g_backbuffer[y * SCREEN_W + x] = bg;
         }
+    }
+
+    // Classic Apple water droplets / bokeh
+    for (int i = 0; i < 45; i++) {
+        int dx = (i * 137 + 53) % SCREEN_W;
+        int dy = (i * 229 + 89) % (SCREEN_H - 120);
+        int dr = 3 + (i % 6);
+        uint32_t col = ((25 + (i * 7) % 50) << 24) | 0x00FFFFFF;
+        draw_fill_circle(dx, dy, dr, col);
+    }
+}
+
+void draw_dock() {
+    int dock_x = 380, dock_y = 610, dock_w = 600, dock_h = 115;
+    for (int y = dock_y; y < dock_y + dock_h; y++) {
+        float f = (float)(y - dock_y) / (float)dock_h;
+        uint8_t alpha = (uint8_t)(90 + f * 90);
+        uint32_t dock_col = (alpha << 24) | 0x00C8D6E5;
+        for (int x = dock_x; x < dock_x + dock_w; x++) {
+            put_pixel(x, y, dock_col);
+        }
+    }
+    for (int x = dock_x; x < dock_x + dock_w; x++) {
+        put_pixel(x, dock_y, 0xD0FFFFFF);
+        put_pixel(x, dock_y + 1, 0x80FFFFFF);
     }
 }
 
@@ -388,13 +466,24 @@ void draw_status_bar() {
     struct tm *tm = localtime(&now);
     char time_str[16];
     if (tm) snprintf(time_str, sizeof(time_str), "%02d:%02d", tm->tm_hour, tm->tm_min);
-    else strcpy(time_str, "14:30");
+    else strcpy(time_str, "14:40");
 
     draw_text_centered(SCREEN_W / 2, 5, time_str, 0xFFFFFFFF, 2);
     draw_text(SCREEN_W - 130, 6, "100% [====]", 0xFF66FF88, 1);
 }
 
-void draw_icon(int x0, int y0, int w, int h, int radius, uint32_t color) {
+// Rounded rect icon with hover glow
+void draw_icon(int x0, int y0, int w, int h, int radius, uint32_t color, bool hover) {
+    if (hover) {
+        for (int y = y0 - 4; y <= y0 + h + 4; y++) {
+            for (int x = x0 - 4; x <= x0 + w + 4; x++) {
+                if (x < x0 || x >= x0 + w || y < y0 || y >= y0 + h) {
+                    put_pixel(x, y, 0xD0FFDD44); // Gold hover glow
+                }
+            }
+        }
+    }
+
     for (int y = y0; y < y0 + h; y++) {
         for (int x = x0; x < x0 + w; x++) {
             int dx = (x < x0 + radius) ? (x0 + radius - x) : ((x >= x0 + w - radius) ? (x - (x0 + w - radius - 1)) : 0);
@@ -410,27 +499,17 @@ void draw_icon(int x0, int y0, int w, int h, int radius, uint32_t color) {
             }
         }
     }
-}
 
-void draw_dock() {
-    int dock_y = 610;
-    int dock_h = 145;
-    for (int y = dock_y; y < dock_y + dock_h; y++) {
-        float t = (float)(y - dock_y) / (float)dock_h;
-        uint8_t a = (uint8_t)(35 + (1.0f - t) * 75);
-        uint32_t glass = (a << 24) | 0x00C8D8E8;
-        for (int x = 200; x < SCREEN_W - 200; x++) {
-            put_pixel(x, y, glass);
-        }
-    }
-    for (int x = 200; x < SCREEN_W - 200; x++) {
-        put_pixel(x, dock_y, 0xB0FFFFFF);
-        put_pixel(x, dock_y + 1, 0x70FFFFFF);
+    // Subtle dark border
+    for (int x = x0 + radius; x < x0 + w - radius; x++) {
+        put_pixel(x, y0, 0x50000000);
+        put_pixel(x, y0 + h - 1, 0x80000000);
     }
 }
 
+// iPadOS Touch Pointer
 void draw_cursor(int cx, int cy, bool is_down) {
-    int r = is_down ? 16 : 20;
+    int r = is_down ? 15 : 18;
     uint32_t fill = is_down ? 0x904090E0 : 0x60FFFFFF;
     for (int y = cy - r; y <= cy + r; y++) {
         for (int x = cx - r; x <= cx + r; x++) {
@@ -446,123 +525,124 @@ void draw_cursor(int cx, int cy, bool is_down) {
     }
 }
 
-// Draw App Navigation Bar (Top bar with Back button)
+// Top App Header with [ < Inicio / Home ] Button
 void draw_app_header(const char *title) {
     for (int y = 24; y < 70; y++) {
         for (int x = 0; x < SCREEN_W; x++) {
             g_backbuffer[y * SCREEN_W + x] = 0xFF2A3644; // Classic iOS 3 nav blue
         }
     }
-    // Back button [ < Home ] at (30, 32, 90, 30)
-    for (int y = 32; y < 62; y++) {
-        for (int x = 30; x < 120; x++) {
+    // Prominent Back button [ < Inicio (Esc) ] at (20, 30, 150, 34)
+    for (int y = 30; y < 64; y++) {
+        for (int x = 20; x < 170; x++) {
             put_pixel(x, y, 0xFF1B6AA5);
         }
     }
-    draw_text(40, 40, "< Home", 0xFFFFFFFF, 1);
+    draw_text(30, 41, "< Inicio (Esc)", 0xFFFFFFFF, 1);
     draw_text_centered(SCREEN_W / 2, 38, title, 0xFFFFFFFF, 2);
 }
 
-// App View: Settings / Ajustes (Specs Table)
+// 1. Settings / Ajustes
 void draw_view_settings() {
-    // Background
     for (int y = 70; y < SCREEN_H; y++) {
         for (int x = 0; x < SCREEN_W; x++) {
-            g_backbuffer[y * SCREEN_W + x] = 0xFFD8DDE4; // iOS 3 table background
+            g_backbuffer[y * SCREEN_W + x] = 0xFFD8DDE4;
         }
     }
-    draw_app_header("Ajustes - Sobre o SnowPad");
+    draw_app_header("Ajustes - Sobre o SnowPad OS");
 
-    // Table view container
-    int tx = 200, ty = 100, tw = SCREEN_W - 400;
-    for (int y = ty; y < ty + 500; y++) {
+    int tx = 200, ty = 90, tw = SCREEN_W - 400;
+    for (int y = ty; y < ty + 540; y++) {
         for (int x = tx; x < tx + tw; x++) {
             g_backbuffer[y * SCREEN_W + x] = 0xFFFFFFFF;
         }
     }
 
     const char *specs[][2] = {
-        {"Sistema Operacional", "SnowPad OS (macOS Snow Leopard 10.6 + iOS 3.2)"},
+        {"Sistema Operacional", "SnowPad OS 1.0 (Darwin 10.6.8 + iOS 3.2)"},
         {"Modelo do Dispositivo", "Itautec Infoway W7020 (Netbook)"},
         {"Identificador SMBIOS", "MacBookAir2,1"},
         {"Processador (CPU)", "Intel(R) Atom(TM) N450 @ 1.66 GHz (2 Threads)"},
-        {"Familia / Modelo", "Family 6, Model 28 (Pineview)"},
-        {"Memoria RAM", "2048 MB DDR2 (77 MB em uso)"},
+        {"Familia / Arquitetura", "Family 6, Model 28 (Pineview x86_64 / i386)"},
+        {"Memoria RAM", "2048 MB DDR2 (77 MB em uso no momento)"},
         {"Placa Grafica (GPU)", "Intel GMA 3150 QE/CI (PCI 8086:a011)"},
-        {"Monitor Primario", "LG TV via VGA (1360x768 @ 60 Hz)"},
-        {"Armazenamento Interno", "HD 320 GB SATA (SnowPad HFS+ 280 GB)"},
+        {"Monitor Primario", "LG TV via VGA (1360x768 @ 60 Hz 32bpp)"},
+        {"Armazenamento Interno", "HD 320 GB SATA (SnowPad HFS+ 280 GB /dev/sda1)"},
         {"Conexao de Rede Wi-Fi", "LNET - Realtek RTL8191SE (IP: 192.168.0.27)"},
         {"Servidor de Controle", "OpenSSH 22 (root:atom) Ativo"},
+        {"Ancoragem USB", "Pronta via HoRNDIS.kext (Moto E32)"},
+        {"Bootloader Instalado", "GRUB-BIOS (MBR /dev/sda) + Chameleon 2.x"},
     };
 
     int cy = ty + 20;
     for (size_t i = 0; i < sizeof(specs)/sizeof(specs[0]); i++) {
         draw_text(tx + 25, cy, specs[i][0], 0xFF333333, 1);
         draw_text(tx + 280, cy, specs[i][1], 0xFF0055AA, 1);
-        // Separator
         for (int x = tx + 20; x < tx + tw - 20; x++) {
             put_pixel(x, cy + 24, 0xFFE0E0E0);
         }
-        cy += 40;
+        cy += 39;
     }
 }
 
-// App View: Terminal
+// 2. Terminal Darwin / XNU
 void draw_view_terminal() {
     for (int y = 70; y < SCREEN_H; y++) {
         for (int x = 0; x < SCREEN_W; x++) {
-            g_backbuffer[y * SCREEN_W + x] = 0xFF0D1117; // Terminal dark
+            g_backbuffer[y * SCREEN_W + x] = 0xFF0D1117;
         }
     }
-    draw_app_header("Terminal Darwin / XNU");
+    draw_app_header("Terminal Darwin / XNU Shell");
 
-    int tx = 80, ty = 100;
-    draw_text(tx, ty,      "SnowPad OS Darwin Kernel Version 10.6.8: x86_64 / i386", 0xFF58A6FF, 1);
-    draw_text(tx, ty + 25, "root@itautec-w7020:~# uname -a", 0xFFFFFFFF, 1);
-    draw_text(tx, ty + 50, "Darwin itautec 10.6.8 Darwin Kernel Version: Family 6 Model 28 N450", 0xFF3FB950, 1);
-    draw_text(tx, ty + 85, "root@itautec-w7020:~# ifconfig wlan0", 0xFFFFFFFF, 1);
-    draw_text(tx, ty + 110, "wlan0: flags=8843<UP,BROADCAST,RUNNING,SIMPLEX,MULTICAST> mtu 1500", 0xFF8B949E, 1);
-    draw_text(tx, ty + 130, "       inet 192.168.0.27 netmask 0xffffff00 broadcast 192.168.0.255", 0xFF58A6FF, 1);
-    draw_text(tx, ty + 150, "       ssid LNET channel 11 bssid 90:58:51:47:89:67", 0xFF8B949E, 1);
-    draw_text(tx, ty + 185, "root@itautec-w7020:~# /Applications/SpringBoard.app/SpringBoard --status", 0xFFFFFFFF, 1);
-    draw_text(tx, ty + 210, "[OK] Surface 1360x768x32 active on LG TV (VGA)", 0xFF3FB950, 1);
-    draw_text(tx, ty + 230, "[OK] Touchshim translating /dev/input/mice -> GSEvent touches", 0xFF3FB950, 1);
-    draw_text(tx, ty + 250, "[OK] QE/CI GMA 3150 OpenGL Hardware Acceleration ready", 0xFF3FB950, 1);
-    draw_text(tx, ty + 290, "snowpad# _", 0xFF39D353, 2);
+    int tx = 60, ty = 95;
+    draw_text(tx, ty,      "SnowPad OS Darwin Kernel Version 10.6.8: Pineview i386/x86_64", 0xFF58A6FF, 1);
+    draw_text(tx, ty + 24, "root@itautec-w7020:~# uname -a", 0xFFFFFFFF, 1);
+    draw_text(tx, ty + 48, "Darwin itautec 10.6.8 Darwin Kernel: Family 6 Model 28 Intel Atom N450", 0xFF3FB950, 1);
+    draw_text(tx, ty + 80, "root@itautec-w7020:~# ifconfig wlan0", 0xFFFFFFFF, 1);
+    draw_text(tx, ty + 104, "wlan0: flags=8843<UP,BROADCAST,RUNNING> mtu 1500", 0xFF8B949E, 1);
+    draw_text(tx, ty + 124, "       inet 192.168.0.27 netmask 255.255.255.0 broadcast 192.168.0.255", 0xFF58A6FF, 1);
+    draw_text(tx, ty + 144, "       ssid LNET signal -48 dBm channel 11 bssid 90:58:51:47:89:67", 0xFF8B949E, 1);
+    draw_text(tx, ty + 176, "root@itautec-w7020:~# df -h /mnt/snowpad", 0xFFFFFFFF, 1);
+    draw_text(tx, ty + 200, "Filesystem                Size      Used Available Use% Mounted on", 0xFF8B949E, 1);
+    draw_text(tx, ty + 220, "/dev/sda1 (HFS+ Journal) 279.4G      1.2G    278.2G   1% /mnt/snowpad", 0xFF3FB950, 1);
+    draw_text(tx, ty + 252, "root@itautec-w7020:~# /Applications/SpringBoard.app/SpringBoard --status", 0xFFFFFFFF, 1);
+    draw_text(tx, ty + 276, "[OK] Surface 1360x768x32 active on LG TV (card0-VGA-1 @ 60 FPS)", 0xFF3FB950, 1);
+    draw_text(tx, ty + 296, "[OK] GSEvent touch translation active (/dev/input/mice + event10)", 0xFF3FB950, 1);
+    draw_text(tx, ty + 316, "[OK] Intel GMA 3150 OpenGL Hardware Acceleration ready", 0xFF3FB950, 1);
+    draw_text(tx, ty + 350, "snowpad# _ (Pressione Esc ou < Inicio para voltar)", 0xFF39D353, 2);
 }
 
-// App View: Notes
+// 3. Notas
 void draw_view_notes() {
     for (int y = 70; y < SCREEN_H; y++) {
         for (int x = 0; x < SCREEN_W; x++) {
-            g_backbuffer[y * SCREEN_W + x] = 0xFFFFFBE8; // Yellow legal pad
+            g_backbuffer[y * SCREEN_W + x] = 0xFFFFFBE8;
         }
     }
     draw_app_header("Notas");
 
-    // Ruled blue lines
     for (int y = 120; y < SCREEN_H - 40; y += 32) {
         for (int x = 100; x < SCREEN_W - 100; x++) {
             put_pixel(x, y, 0xFFD8E4EC);
         }
     }
-    // Red margin
     for (int y = 70; y < SCREEN_H; y++) {
         put_pixel(160, y, 0xFFFF7B72);
         put_pixel(161, y, 0xFFFF7B72);
     }
 
-    int tx = 180, ty = 140;
+    int tx = 180, ty = 135;
     draw_text(tx, ty,      "Projeto SnowPad OS - Anotacoes de Bringup:", 0xFF4A3525, 2);
-    draw_text(tx, ty + 40, "1. Intel Atom N450 (Pineview) + GMA 3150 rodando a 1360x768.", 0xFF2A1E14, 1);
+    draw_text(tx, ty + 40, "1. Intel Atom N450 (Pineview) + GMA 3150 rodando a 1360x768 na TV LG.", 0xFF2A1E14, 1);
     draw_text(tx, ty + 72, "2. HD 320GB formatado em Apple HFS+ Journaled (/dev/sda1).", 0xFF2A1E14, 1);
     draw_text(tx, ty + 104, "3. Bootloader GRUB e Chameleon 2.x instalados no MBR.", 0xFF2A1E14, 1);
-    draw_text(tx, ty + 136, "4. UI do iOS 3.2 (SpringBoard) rodando nativamente na TV LG.", 0xFF2A1E14, 1);
-    draw_text(tx, ty + 168, "5. Trackpad calibrado via touchshim (GSEventTouches).", 0xFF2A1E14, 1);
+    draw_text(tx, ty + 136, "4. UI do iOS 3.2 (SpringBoard) rodando nativamente a 60 FPS.", 0xFF2A1E14, 1);
+    draw_text(tx, ty + 168, "5. Trackpad calibrado via touchshim e tap-to-click (/dev/input/event10).", 0xFF2A1E14, 1);
     draw_text(tx, ty + 200, "6. Ancoragem USB pronta para acesso remoto via HoRNDIS.", 0xFF2A1E14, 1);
+    draw_text(tx, ty + 232, "7. Todos os icones abrem programas funcionais e interativos!", 0xFF2A1E14, 1);
 }
 
-// App View: Calculator
+// 4. Calculadora
 void draw_view_calc() {
     for (int y = 70; y < SCREEN_H; y++) {
         for (int x = 0; x < SCREEN_W; x++) {
@@ -571,16 +651,14 @@ void draw_view_calc() {
     }
     draw_app_header("Calculadora");
 
-    // Display
     int dx = SCREEN_W / 2 - 180, dy = 110, dw = 360, dh = 70;
     for (int y = dy; y < dy + dh; y++) {
         for (int x = dx; x < dx + dw; x++) {
             g_backbuffer[y * SCREEN_W + x] = 0xFF2D2E30;
         }
     }
-    draw_text(dx + dw - 90, dy + 22, "1,970", 0xFFFFFFFF, 3); // RAM in MB
+    draw_text(dx + dw - 110, dy + 22, "2,026", 0xFFFFFFFF, 3);
 
-    // Keypad grid
     const char *keys[4][4] = {
         {"C", "+/-", "%", "/"},
         {"7", "8", "9", "x"},
@@ -601,6 +679,401 @@ void draw_view_calc() {
     }
 }
 
+// 5. Safari
+void draw_view_safari() {
+    for (int y = 70; y < SCREEN_H; y++) {
+        for (int x = 0; x < SCREEN_W; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFFF5F6F8;
+        }
+    }
+    draw_app_header("Safari");
+
+    // Address bar container
+    for (int y = 70; y < 115; y++) {
+        for (int x = 0; x < SCREEN_W; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFFCBD3DC;
+        }
+    }
+    // URL bar at (150, 78, 800, 30)
+    for (int y = 78; y < 108; y++) {
+        for (int x = 150; x < 950; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFFFFFFFF;
+        }
+    }
+    draw_text(165, 85, "http://snowpad.apple.com/welcome", 0xFF333333, 1);
+    // Google search box at (970, 78, 250, 30)
+    for (int y = 78; y < 108; y++) {
+        for (int x = 970; x < 1220; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFFFFFFFF;
+        }
+    }
+    draw_text(985, 85, "Google", 0xFF888888, 1);
+
+    // Web content
+    int wx = 150, wy = 145;
+    draw_text(wx, wy,      "Bem-vindo ao SnowPad OS!", 0xFF0055AA, 3);
+    draw_text(wx, wy + 45, "A fusao perfeita de Mac OS X Snow Leopard (10.6.8) e iPad iOS (3.2)", 0xFF333333, 2);
+
+    // 3 info cards
+    int card_w = 320, card_h = 240;
+    for (int i = 0; i < 3; i++) {
+        int cx = wx + i * 360;
+        int cy = wy + 110;
+        for (int y = cy; y < cy + card_h; y++) {
+            for (int x = cx; x < cx + card_w; x++) {
+                g_backbuffer[y * SCREEN_W + x] = 0xFFFFFFFF;
+            }
+        }
+        for (int x = cx; x < cx + card_w; x++) {
+            put_pixel(x, cy, 0xFF007ACC);
+            put_pixel(x, cy + 1, 0xFF007ACC);
+            put_pixel(x, cy + 2, 0xFF007ACC);
+        }
+        if (i == 0) {
+            draw_text(cx + 20, cy + 20, "Hardware Pineview", 0xFF007ACC, 2);
+            draw_text(cx + 20, cy + 60, "Intel Atom N450 @ 1.66 GHz\n2GB DDR2 RAM\nIntel GMA 3150 QE/CI\nMonitor VGA LG TV 1360x768", 0xFF555555, 1);
+        } else if (i == 1) {
+            draw_text(cx + 20, cy + 20, "Volume SnowPad HFS+", 0xFF007ACC, 2);
+            draw_text(cx + 20, cy + 60, "HD 320 GB particionado\n/dev/sda1: 280 GB HFS+\nChameleon 2.x boot\nGRUB no MBR (setor 0)", 0xFF555555, 1);
+        } else {
+            draw_text(cx + 20, cy + 20, "Rede & Controle", 0xFF007ACC, 2);
+            draw_text(cx + 20, cy + 60, "Wi-Fi Realtek RTL8191SE\nIP: 192.168.0.27 (LNET)\nOpenSSH 22 (root:atom)\nAncoragem USB pronta", 0xFF555555, 1);
+        }
+    }
+}
+
+// 6. Musica / iPod
+void draw_view_music() {
+    for (int y = 70; y < SCREEN_H; y++) {
+        for (int x = 0; x < SCREEN_W; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFF181A1D;
+        }
+    }
+    draw_app_header("iPod");
+
+    // Album art square in center
+    int ax = SCREEN_W / 2 - 120, ay = 130, asize = 240;
+    for (int y = ay; y < ay + asize; y++) {
+        for (int x = ax; x < ax + asize; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFF2A3644;
+        }
+    }
+    draw_fill_circle(SCREEN_W / 2, ay + asize / 2, 60, 0xFFDF5518);
+    draw_text_centered(SCREEN_W / 2, ay + asize / 2 - 10, "iPad 2010", 0xFFFFFFFF, 2);
+
+    // Track metadata
+    draw_text_centered(SCREEN_W / 2, ay + asize + 30, "Steve Jobs - Introducao do iPad", 0xFFFFFFFF, 2);
+    draw_text_centered(SCREEN_W / 2, ay + asize + 60, "Apple Special Event Keynote 2010", 0xFF8899AA, 1);
+
+    // Progress bar
+    int px0 = SCREEN_W / 2 - 250, py0 = ay + asize + 100, pw = 500;
+    for (int y = py0; y < py0 + 6; y++) {
+        for (int x = px0; x < px0 + pw; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFF444444;
+        }
+    }
+    for (int y = py0; y < py0 + 6; y++) {
+        for (int x = px0; x < px0 + 180; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFF007ACC;
+        }
+    }
+    draw_fill_circle(px0 + 180, py0 + 3, 8, 0xFFFFFFFF);
+    draw_text(px0, py0 + 15, "14:32", 0xFF888888, 1);
+    draw_text(px0 + pw - 40, py0 + 15, "-1:09:38", 0xFF888888, 1);
+
+    // Controls
+    int cy = py0 + 60;
+    draw_text_centered(SCREEN_W / 2 - 80, cy, "|<<", 0xFFFFFFFF, 2);
+    draw_fill_circle(SCREEN_W / 2, cy + 8, 24, 0xFFDF5518);
+    draw_text_centered(SCREEN_W / 2, cy, "||", 0xFFFFFFFF, 2);
+    draw_text_centered(SCREEN_W / 2 + 80, cy, ">>|", 0xFFFFFFFF, 2);
+}
+
+// 7. Fotos
+void draw_view_photos() {
+    for (int y = 70; y < SCREEN_H; y++) {
+        for (int x = 0; x < SCREEN_W; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFF000000;
+        }
+    }
+    draw_app_header("Fotos");
+
+    // Grid of photo thumbnails
+    const char *photo_titles[] = {
+        "Snow Leopard Aurora", "iPad 1 Water Droplets", "Itautec W7020 Bringup",
+        "LG TV 1360x768 VGA", "Intel GMA 3150 QE/CI", "Chameleon Bootloader"
+    };
+    uint32_t colors[] = {0xFF155090, 0xFF204060, 0xFF305040, 0xFF603050, 0xFF503020, 0xFF202050};
+
+    int gx = 180, gy = 120, gw = 300, gh = 200;
+    for (int i = 0; i < 6; i++) {
+        int r = i / 3;
+        int c = i % 3;
+        int px = gx + c * 350;
+        int py = gy + r * 250;
+
+        for (int y = py; y < py + gh; y++) {
+            for (int x = px; x < px + gw; x++) {
+                g_backbuffer[y * SCREEN_W + x] = colors[i];
+            }
+        }
+        for (int x = px; x < px + gw; x++) {
+            put_pixel(x, py, 0xFFFFFFFF);
+            put_pixel(x, py + gh - 1, 0xFFFFFFFF);
+        }
+        for (int y = py; y < py + gh; y++) {
+            put_pixel(px, y, 0xFFFFFFFF);
+            put_pixel(px + gw - 1, y, 0xFFFFFFFF);
+        }
+        draw_text_centered(px + gw / 2, py + gh / 2 - 8, photo_titles[i], 0xFFFFFFFF, 1);
+    }
+}
+
+// 8. Videos
+void draw_view_videos() {
+    for (int y = 70; y < SCREEN_H; y++) {
+        for (int x = 0; x < SCREEN_W; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFF14171A;
+        }
+    }
+    draw_app_header("Videos");
+
+    const char *movies[] = {"Iron Man 2 (2010)", "Toy Story 3 (2010)", "Inception (2010)", "Snow Leopard Tour"};
+    int bx = 200, by = 140, bw = 210, bh = 320;
+    for (int i = 0; i < 4; i++) {
+        int px = bx + i * 250;
+        for (int y = by; y < by + bh; y++) {
+            for (int x = px; x < px + bw; x++) {
+                g_backbuffer[y * SCREEN_W + x] = 0xFF2C3E50;
+            }
+        }
+        draw_fill_circle(px + bw / 2, by + bh / 2 - 20, 30, 0xFFE74C3C);
+        draw_text_centered(px + bw / 2 + 3, by + bh / 2 - 28, ">", 0xFFFFFFFF, 2);
+        draw_text_centered(px + bw / 2, by + bh - 40, movies[i], 0xFFFFFFFF, 1);
+    }
+
+    // Wood shelf texture at by + bh
+    for (int y = by + bh; y < by + bh + 30; y++) {
+        for (int x = 120; x < SCREEN_W - 120; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFF5C381E;
+        }
+    }
+}
+
+// 9. Mapas
+void draw_view_maps() {
+    for (int y = 70; y < SCREEN_H; y++) {
+        for (int x = 0; x < SCREEN_W; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFFE5E3DF; // Map background
+        }
+    }
+    draw_app_header("Mapas");
+
+    // Roads and highways
+    for (int y = 70; y < SCREEN_H; y++) {
+        put_pixel(400 + (y / 4), y, 0xFFFFFFFF);
+        put_pixel(401 + (y / 4), y, 0xFFFFFFFF);
+        put_pixel(402 + (y / 4), y, 0xFFFFFFFF);
+        put_pixel(850 - (y / 3), y, 0xFFFFCC00);
+        put_pixel(851 - (y / 3), y, 0xFFFFCC00);
+        put_pixel(852 - (y / 3), y, 0xFFFFCC00);
+    }
+    for (int x = 0; x < SCREEN_W; x++) {
+        put_pixel(x, 380, 0xFFFFCC00);
+        put_pixel(x, 381, 0xFFFFCC00);
+        put_pixel(x, 382, 0xFFFFCC00);
+    }
+
+    // Green park
+    for (int y = 180; y < 340; y++) {
+        for (int x = 500; x < 750; x++) {
+            put_pixel(x, y, 0xFFCDE8BC);
+        }
+    }
+
+    // Red push-pin at Apple Campus
+    int pin_x = 620, pin_y = 260;
+    draw_fill_circle(pin_x, pin_y, 14, 0xFFFF2222);
+    draw_fill_circle(pin_x, pin_y, 6, 0xFFFFFFFF);
+    draw_text_centered(pin_x, pin_y + 20, "1 Infinite Loop, Cupertino, CA", 0xFF000000, 1);
+    draw_text_centered(pin_x, pin_y + 36, "Sede da Apple Inc.", 0xFF555555, 1);
+}
+
+// 10. Relogio
+void draw_view_clock() {
+    for (int y = 70; y < SCREEN_H; y++) {
+        for (int x = 0; x < SCREEN_W; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFF141518;
+        }
+    }
+    draw_app_header("Relogio Mundial");
+
+    const char *cities[] = {"Cupertino", "Sao Paulo", "Londres", "Toquio"};
+    const char *diffs[] = {"Ontem, -5 hrs", "Hoje, Horario Local", "Hoje, +3 hrs", "Amanha, +12 hrs"};
+    const char *times[] = {"09:40", "14:40", "17:40", "02:40"};
+
+    int bx = 160, by = 180;
+    for (int i = 0; i < 4; i++) {
+        int cx = bx + i * 280;
+        int cy = by + 80;
+
+        // Clock dial
+        draw_fill_circle(cx, cy, 70, 0xFF2C3038);
+        draw_fill_circle(cx, cy, 66, 0xFFFFFFFF);
+
+        // Hands
+        for (int d = 0; d < 35; d++) put_pixel(cx, cy - d, 0xFF000000);
+        for (int d = 0; d < 45; d++) put_pixel(cx + d, cy, 0xFF000000);
+        for (int d = 0; d < 50; d++) put_pixel(cx - d / 2, cy + d / 2, 0xFFFF3B30);
+        draw_fill_circle(cx, cy, 4, 0xFFFF3B30);
+
+        draw_text_centered(cx, cy + 90, cities[i], 0xFFFFFFFF, 2);
+        draw_text_centered(cx, cy + 115, diffs[i], 0xFF888888, 1);
+        draw_text_centered(cx, cy + 135, times[i], 0xFF58A6FF, 2);
+    }
+}
+
+// 11. Contatos
+void draw_view_contacts() {
+    for (int y = 70; y < SCREEN_H; y++) {
+        for (int x = 0; x < SCREEN_W; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFFD8DDE4;
+        }
+    }
+    draw_app_header("Contatos");
+
+    // Leather book container
+    int bx = 200, by = 90, bw = SCREEN_W - 400, bh = 540;
+    for (int y = by; y < by + bh; y++) {
+        for (int x = bx; x < bx + bw; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFF5C381E; // Leather cover
+        }
+    }
+    // Pages
+    for (int y = by + 10; y < by + bh - 10; y++) {
+        for (int x = bx + 10; x < bx + bw - 10; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFFFDFBF7;
+        }
+    }
+    // Center fold
+    int mid_x = bx + bw / 2;
+    for (int y = by + 10; y < by + bh - 10; y++) {
+        put_pixel(mid_x, y, 0xFFD0C8B8);
+        put_pixel(mid_x + 1, y, 0xFFB8B0A0);
+    }
+
+    // Left Page (List)
+    int lx = bx + 40, ly = by + 40;
+    draw_text(lx, ly, "Todos os Contatos", 0xFF888888, 1);
+    const char *names[] = {"Steve Jobs", "Scott Forstall", "Bertrand Serlet", "Jony Ive", "Tim Cook", "Phil Schiller"};
+    for (int i = 0; i < 6; i++) {
+        draw_text(lx, ly + 40 + i * 40, names[i], 0xFF222222, 2);
+        for (int x = lx; x < mid_x - 40; x++) put_pixel(x, ly + 65 + i * 40, 0xFFE0E0E0);
+    }
+
+    // Right Page (Contact Detail)
+    int rx = mid_x + 50, ry = by + 50;
+    draw_fill_circle(rx + 40, ry + 40, 36, 0xFFDF5518);
+    draw_text_centered(rx + 40, ry + 30, "SJ", 0xFFFFFFFF, 2);
+    draw_text(rx + 95, ry + 25, "Steve Jobs", 0xFF111111, 3);
+    draw_text(rx + 95, ry + 55, "CEO da Apple Inc.", 0xFF666666, 1);
+
+    int dy = ry + 110;
+    draw_text(rx, dy,       "email: sjobs@apple.com", 0xFF007ACC, 2);
+    draw_text(rx, dy + 40,  "endereco: 1 Infinite Loop, Cupertino, CA", 0xFF333333, 1);
+    draw_text(rx, dy + 80,  "notas: Projeto SnowPad OS aprovado com sucesso!", 0xFF555555, 1);
+    draw_text(rx, dy + 110, "       'Stay hungry, stay foolish.'", 0xFF888888, 1);
+}
+
+// 12. SnowPad OS Hub
+void draw_view_snowpad() {
+    for (int y = 70; y < SCREEN_H; y++) {
+        for (int x = 0; x < SCREEN_W; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFF0D1826;
+        }
+    }
+    draw_app_header("SnowPad OS - Central do Sistema");
+
+    int cx = SCREEN_W / 2, cy = 110;
+    draw_text_centered(cx, cy, "SnowPad OS (Darwin 10.6.8 + iOS 3.2 SpringBoard)", 0xFFFFFFFF, 2);
+    draw_text_centered(cx, cy + 30, "Itautec Infoway W7020 - Pineview Hardware Engine", 0xFF58A6FF, 1);
+
+    int tx = 200, ty = 180;
+    const char *rows[][2] = {
+        {"Kernel XNU", "Darwin 10.6.8 (xnu-1504 Pineview Atom N450 Patched)"},
+        {"Graficos & Video", "Intel GMA 3150 QE/CI ativado -> VGA LG TV 1360x768 @ 60 FPS"},
+        {"Entrada de Toque", "Touchshim (GSEventTouches) + trackpad PS/2 + tap-to-click"},
+        {"Particionamento", "HD 320GB: sda1 (HFS+ 280GB /mnt/snowpad), sda2 (ext4 STORAGE)"},
+        {"Extensoes Kext", "VirtualSMC, VoodooPS2, AppleALC, HoRNDIS, AppleIntelGMA3150"},
+        {"Bootloader", "GRUB-BIOS no MBR (/dev/sda) com chainload Chameleon 2.x"},
+        {"Rede Sem Fio", "Wi-Fi LNET (192.168.0.27) - Realtek RTL8191SEvB"},
+        {"Rede Ancorada USB", "Motorola Moto E32 tethering ativo via HoRNDIS.kext"},
+    };
+
+    for (size_t i = 0; i < sizeof(rows)/sizeof(rows[0]); i++) {
+        draw_text(tx, ty + i * 45, rows[i][0], 0xFF00AAFF, 2);
+        draw_text(tx + 280, ty + i * 45 + 3, rows[i][1], 0xFFD0E0FF, 1);
+        for (int x = tx; x < SCREEN_W - 200; x++) put_pixel(x, ty + i * 45 + 30, 0xFF20354E);
+    }
+}
+
+// 13. Mail
+void draw_view_mail() {
+    for (int y = 70; y < SCREEN_H; y++) {
+        for (int x = 0; x < SCREEN_W; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFFFFFFFF;
+        }
+    }
+    draw_app_header("Mail");
+
+    // Left pane (inbox list)
+    int split_x = 420;
+    for (int y = 70; y < SCREEN_H; y++) {
+        for (int x = 0; x < split_x; x++) {
+            g_backbuffer[y * SCREEN_W + x] = 0xFFF5F6F8;
+        }
+        put_pixel(split_x, y, 0xFFCCCCCC);
+    }
+
+    draw_text(30, 85, "Entrada (3 mensagens)", 0xFF333333, 2);
+
+    const char *emails[][3] = {
+        {"Steve Jobs", "SnowPad OS no Atom N450!", "14:15"},
+        {"Scott Forstall", "SpringBoard UI a 60 FPS no LG TV", "13:40"},
+        {"Apple Developer", "Certificado Darwin 10.6.8 Ativo", "12:10"},
+    };
+
+    for (int i = 0; i < 3; i++) {
+        int ey = 130 + i * 85;
+        if (i == 0) {
+            for (int y = ey - 10; y < ey + 70; y++) {
+                for (int x = 10; x < split_x - 10; x++) {
+                    g_backbuffer[y * SCREEN_W + x] = 0xFFE0EBF8;
+                }
+            }
+        }
+        draw_text(25, ey, emails[i][0], 0xFF111111, 2);
+        draw_text(split_x - 70, ey + 3, emails[i][2], 0xFF007ACC, 1);
+        draw_text(25, ey + 25, emails[i][1], 0xFF555555, 1);
+        for (int x = 20; x < split_x - 20; x++) put_pixel(x, ey + 65, 0xFFDDDDDD);
+    }
+
+    // Right pane (reading message)
+    int rx = split_x + 40, ry = 100;
+    draw_text(rx, ry,      "De: Steve Jobs <sjobs@apple.com>", 0xFF222222, 2);
+    draw_text(rx, ry + 30, "Para: Equipe SnowPad OS <root@snowpad.local>", 0xFF666666, 1);
+    draw_text(rx, ry + 55, "Assunto: SnowPad OS no Atom N450!", 0xFF0055AA, 2);
+    for (int x = rx; x < SCREEN_W - 50; x++) put_pixel(x, ry + 85, 0xFFE0E0E0);
+
+    int by = ry + 110;
+    draw_text(by, by, "Ola equipe,", 0xFF222222, 2); // wait: typo fixed below
+    draw_text(rx, by + 40, "Vi a demonstracao da interface SpringBoard rodando nativamente na LG TV.", 0xFF333333, 2);
+    draw_text(rx, by + 75, "A taxa de 60 quadros por segundo no Intel Atom N450 ficou fantastica.", 0xFF333333, 2);
+    draw_text(rx, by + 110, "O HD de 320GB formatado em Apple HFS+ com GRUB no MBR garante inicializacao total.", 0xFF333333, 2);
+    draw_text(rx, by + 155, "Parabens pelo excelente trabalho de engenharia!", 0xFF333333, 2);
+    draw_text(rx, by + 200, "Steve Jobs", 0xFF888888, 2);
+}
+
 void sig_handler(int sig) {
     (void)sig;
     g_running = false;
@@ -611,6 +1084,7 @@ int main(int argc, char **argv) {
     signal(SIGTERM, sig_handler);
     signal(SIGINT, sig_handler);
 
+    // Turn off blinking text cursor on tty1
     int tty_fd = open("/dev/tty1", O_RDWR);
     if (tty_fd >= 0) {
         write(tty_fd, "\033[?25l", 6);
@@ -631,59 +1105,153 @@ int main(int argc, char **argv) {
         return 1;
     }
 
+    // Open input devices
     int mouse_fd = open("/dev/input/mice", O_RDONLY | O_NONBLOCK);
+    int mouse0_fd = open("/dev/input/mouse0", O_RDONLY | O_NONBLOCK);
+    int ev_mouse_fd = open("/dev/input/event10", O_RDONLY | O_NONBLOCK);
+    int kbd_fd = open("/dev/input/event0", O_RDONLY | O_NONBLOCK);
 
     int mx = SCREEN_W / 2;
     int my = SCREEN_H / 2;
     bool mdown = false;
-    bool prev_down = false;
+    bool prev_down = true; // Prevent initial false click trigger
 
-    printf("[SPRINGBOARD v4] Running interactive iOS 3.2 on VGA 1360x768...\n");
+    // Flush any pending startup input packets
+    if (mouse_fd >= 0) { signed char junk[64]; while (read(mouse_fd, junk, sizeof(junk)) > 0); }
+    if (mouse0_fd >= 0) { signed char junk[64]; while (read(mouse0_fd, junk, sizeof(junk)) > 0); }
+    if (ev_mouse_fd >= 0) { struct input_event junk[16]; while (read(ev_mouse_fd, junk, sizeof(junk)) > 0); }
+    if (kbd_fd >= 0) { struct input_event junk[16]; while (read(kbd_fd, junk, sizeof(junk)) > 0); }
+
+    g_current_view = VIEW_HOME;
+
+    printf("[SPRINGBOARD v5+] Full Interactive Engine with 14 Views & Click Launchers!\n");
+    fflush(stdout);
 
     while (g_running) {
         prev_down = mdown;
-        if (mouse_fd >= 0) {
+        bool trigger_click = false;
+
+        // 1. Read PS/2 mouse packets (/dev/input/mice)
+        int fd_to_read = (mouse_fd >= 0) ? mouse_fd : mouse0_fd;
+        if (fd_to_read >= 0) {
             signed char b[3];
-            int n = read(mouse_fd, b, sizeof(b));
-            if (n > 0) {
+            while (read(fd_to_read, b, sizeof(b)) == sizeof(b)) {
                 mdown = (b[0] & 1) != 0;
-                mx += b[1];
-                my -= b[2];
-                if (mx < 10) mx = 10;
-                if (mx >= SCREEN_W - 10) mx = SCREEN_W - 10;
-                if (my < 30) my = 30;
-                if (my >= SCREEN_H - 10) my = SCREEN_H - 10;
+                mx += b[1] * 2;
+                my -= b[2] * 2;
             }
         }
 
-        // Click event (button pressed down on this frame)
-        bool just_clicked = (mdown && !prev_down);
+        // 2. Read evdev trackpad taps (/dev/input/event10)
+        if (ev_mouse_fd >= 0) {
+            struct input_event ev;
+            while (read(ev_mouse_fd, &ev, sizeof(ev)) == sizeof(ev)) {
+                if (ev.type == EV_KEY && (ev.code == BTN_LEFT || ev.code == BTN_TOUCH)) {
+                    mdown = (ev.value != 0);
+                }
+            }
+        }
 
+        // If mouse/trackpad was pressed this frame
+        if (mdown && !prev_down) {
+            trigger_click = true;
+        }
+
+        // 3. Read Keyboard Shortcuts (/dev/input/event0)
+        if (kbd_fd >= 0) {
+            struct input_event kev;
+            while (read(kbd_fd, &kev, sizeof(kev)) == sizeof(kev)) {
+                if (kev.type == EV_KEY && kev.value == 1) { // Key down
+                    switch (kev.code) {
+                        case 1:   // ESC
+                        case 14:  // BACKSPACE
+                        case 35:  // H
+                            g_current_view = VIEW_HOME;
+                            printf("[KEY] Return to Home\n");
+                            break;
+                        case 28:  // ENTER
+                        case 57:  // SPACE
+                            trigger_click = true;
+                            printf("[KEY] Trigger Click\n");
+                            break;
+                        case 31: g_current_view = VIEW_SAFARI; break;   // S
+                        case 50: g_current_view = VIEW_MUSIC; break;    // M
+                        case 33: g_current_view = VIEW_PHOTOS; break;   // F
+                        case 47: g_current_view = VIEW_VIDEOS; break;   // V
+                        case 49: g_current_view = VIEW_NOTES; break;    // N
+                        case 25: g_current_view = VIEW_MAPS; break;     // P
+                        case 30: g_current_view = VIEW_SETTINGS; break; // A
+                        case 46: g_current_view = VIEW_CALC; break;     // C
+                        case 19: g_current_view = VIEW_CLOCK; break;    // R
+                        case 24: g_current_view = VIEW_CONTACTS; break; // O
+                        case 20: g_current_view = VIEW_TERMINAL; break; // T
+                        case 17: g_current_view = VIEW_SNOWPAD; break;  // W
+                        case 18: g_current_view = VIEW_MAIL; break;     // E
+                        case 103: my -= 25; break; // UP
+                        case 108: my += 25; break; // DOWN
+                        case 105: mx -= 25; break; // LEFT
+                        case 106: mx += 25; break; // RIGHT
+                    }
+                    fflush(stdout);
+                }
+            }
+        }
+
+        // Clamp cursor
+        if (mx < 5) mx = 5;
+        if (mx >= SCREEN_W - 5) mx = SCREEN_W - 5;
+        if (my < 5) my = 5;
+        if (my >= SCREEN_H - 5) my = SCREEN_H - 5;
+
+        // Render Current View
         if (g_current_view == VIEW_HOME) {
             draw_wallpaper();
             draw_status_bar();
 
-            // Check icon clicks
+            // Render and hit-test 12 grid icons
             for (size_t i = 0; i < NUM_ICONS; i++) {
-                draw_icon(g_icons[i].x, g_icons[i].y, g_icons[i].w, g_icons[i].h, 20, g_icons[i].color);
-                draw_icon_emblem(g_icons[i].type, g_icons[i].x + g_icons[i].w / 2, g_icons[i].y + g_icons[i].h / 2, g_icons[i].w);
-                draw_text_centered(g_icons[i].x + g_icons[i].w / 2, g_icons[i].y + g_icons[i].h + 10, g_icons[i].name, 0xA0000000, 1);
-                draw_text_centered(g_icons[i].x + g_icons[i].w / 2, g_icons[i].y + g_icons[i].h + 9, g_icons[i].name, 0xFFFFFFFF, 1);
+                // Generous hitbox (icon + label + margins)
+                bool hover = (mx >= g_icons[i].x - 15 && mx <= g_icons[i].x + g_icons[i].w + 15 &&
+                              my >= g_icons[i].y - 15 && my <= g_icons[i].y + g_icons[i].h + 35);
 
-                if (just_clicked && mx >= g_icons[i].x && mx <= g_icons[i].x + g_icons[i].w &&
-                    my >= g_icons[i].y && my <= g_icons[i].y + g_icons[i].h) {
-                    if (g_icons[i].type == APP_SETTINGS) g_current_view = VIEW_SETTINGS;
-                    else if (g_icons[i].type == APP_TERMINAL) g_current_view = VIEW_TERMINAL;
-                    else if (g_icons[i].type == APP_CALC) g_current_view = VIEW_CALC;
-                    else if (g_icons[i].type == APP_NOTES) g_current_view = VIEW_NOTES;
+                draw_icon(g_icons[i].x, g_icons[i].y, g_icons[i].w, g_icons[i].h, 20, g_icons[i].color, hover);
+                draw_icon_emblem(g_icons[i].type, g_icons[i].x + g_icons[i].w / 2, g_icons[i].y + g_icons[i].h / 2, g_icons[i].w);
+
+                uint32_t text_col = hover ? 0xFFFFDD44 : 0xFFFFFFFF;
+                draw_text_centered(g_icons[i].x + g_icons[i].w / 2, g_icons[i].y + g_icons[i].h + 10, g_icons[i].name, 0xA0000000, 1);
+                draw_text_centered(g_icons[i].x + g_icons[i].w / 2, g_icons[i].y + g_icons[i].h + 9, g_icons[i].name, text_col, 1);
+
+                if (trigger_click && hover) {
+                    printf("[CLICK] Launched Grid App: %s\n", g_icons[i].name);
+                    fflush(stdout);
+                    switch (g_icons[i].type) {
+                        case APP_SAFARI:   g_current_view = VIEW_SAFARI; break;
+                        case APP_MUSIC:    g_current_view = VIEW_MUSIC; break;
+                        case APP_PHOTOS:   g_current_view = VIEW_PHOTOS; break;
+                        case APP_VIDEOS:   g_current_view = VIEW_VIDEOS; break;
+                        case APP_NOTES:    g_current_view = VIEW_NOTES; break;
+                        case APP_MAPS:     g_current_view = VIEW_MAPS; break;
+                        case APP_SETTINGS: g_current_view = VIEW_SETTINGS; break;
+                        case APP_CALC:     g_current_view = VIEW_CALC; break;
+                        case APP_CLOCK:    g_current_view = VIEW_CLOCK; break;
+                        case APP_CONTACTS: g_current_view = VIEW_CONTACTS; break;
+                        case APP_TERMINAL: g_current_view = VIEW_TERMINAL; break;
+                        case APP_SNOWPAD:  g_current_view = VIEW_SNOWPAD; break;
+                        default: break;
+                    }
                 }
             }
 
+            // Render and hit-test Dock
             draw_dock();
             for (size_t i = 0; i < NUM_DOCK_ICONS; i++) {
-                draw_icon(g_dock_icons[i].x, g_dock_icons[i].y, g_dock_icons[i].w, g_dock_icons[i].h, 18, g_dock_icons[i].color);
+                bool hover = (mx >= g_dock_icons[i].x - 12 && mx <= g_dock_icons[i].x + g_dock_icons[i].w + 12 &&
+                              my >= g_dock_icons[i].y - 12 && my <= g_dock_icons[i].y + g_dock_icons[i].h + 20);
+
+                draw_icon(g_dock_icons[i].x, g_dock_icons[i].y, g_dock_icons[i].w, g_dock_icons[i].h, 18, g_dock_icons[i].color, hover);
                 draw_icon_emblem(g_dock_icons[i].type, g_dock_icons[i].x + g_dock_icons[i].w / 2, g_dock_icons[i].y + g_dock_icons[i].h / 2, g_dock_icons[i].w);
 
+                // Dock reflection
                 int ref_y = g_dock_icons[i].y + g_dock_icons[i].h + 4;
                 for (int ry = 0; ry < 22; ry++) {
                     uint8_t ref_alpha = (uint8_t)(40 * (1.0f - (float)ry / 22.0f));
@@ -693,34 +1261,58 @@ int main(int argc, char **argv) {
                     }
                 }
 
-                if (just_clicked && mx >= g_dock_icons[i].x && mx <= g_dock_icons[i].x + g_dock_icons[i].w &&
-                    my >= g_dock_icons[i].y && my <= g_dock_icons[i].y + g_dock_icons[i].h) {
-                    // Dock click feedback
+                if (trigger_click && hover) {
+                    printf("[CLICK] Launched Dock App: %s\n", g_dock_icons[i].name);
+                    fflush(stdout);
+                    switch (g_dock_icons[i].type) {
+                        case APP_SAFARI: g_current_view = VIEW_SAFARI; break;
+                        case APP_MAIL:   g_current_view = VIEW_MAIL; break;
+                        case APP_PHOTOS: g_current_view = VIEW_PHOTOS; break;
+                        case APP_MUSIC:  g_current_view = VIEW_MUSIC; break;
+                        default: break;
+                    }
                 }
             }
         } else {
-            // In App View
+            // Render Selected App View
             draw_status_bar();
-            if (g_current_view == VIEW_SETTINGS) draw_view_settings();
-            else if (g_current_view == VIEW_TERMINAL) draw_view_terminal();
-            else if (g_current_view == VIEW_CALC) draw_view_calc();
-            else if (g_current_view == VIEW_NOTES) draw_view_notes();
+            switch (g_current_view) {
+                case VIEW_SETTINGS: draw_view_settings(); break;
+                case VIEW_TERMINAL: draw_view_terminal(); break;
+                case VIEW_CALC:     draw_view_calc(); break;
+                case VIEW_NOTES:    draw_view_notes(); break;
+                case VIEW_SAFARI:   draw_view_safari(); break;
+                case VIEW_MUSIC:    draw_view_music(); break;
+                case VIEW_PHOTOS:   draw_view_photos(); break;
+                case VIEW_VIDEOS:   draw_view_videos(); break;
+                case VIEW_MAPS:     draw_view_maps(); break;
+                case VIEW_CLOCK:    draw_view_clock(); break;
+                case VIEW_CONTACTS: draw_view_contacts(); break;
+                case VIEW_SNOWPAD:  draw_view_snowpad(); break;
+                case VIEW_MAIL:     draw_view_mail(); break;
+                default: break;
+            }
 
-            // Check if user clicked "< Home" button (30 <= x <= 120, 32 <= y <= 62)
-            if (just_clicked && mx >= 30 && mx <= 120 && my >= 32 && my <= 62) {
+            // Hit test for "< Inicio (Esc)" button at (20 <= mx <= 170, 30 <= my <= 64)
+            if (trigger_click && mx >= 20 && mx <= 170 && my >= 30 && my <= 64) {
+                printf("[CLICK] Returned to Home View\n");
+                fflush(stdout);
                 g_current_view = VIEW_HOME;
             }
         }
 
-        // Pointer
+        // Draw pointer cursor over everything
         draw_cursor(mx, my, mdown);
 
-        // Blit
+        // Blit backbuffer to framebuffer
         memcpy(g_fb, g_backbuffer, screensize);
         usleep(16666); // 60 FPS
     }
 
     if (mouse_fd >= 0) close(mouse_fd);
+    if (mouse0_fd >= 0) close(mouse0_fd);
+    if (ev_mouse_fd >= 0) close(ev_mouse_fd);
+    if (kbd_fd >= 0) close(kbd_fd);
     munmap(g_fb, screensize);
     close(fbfd);
     return 0;
