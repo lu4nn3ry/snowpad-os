@@ -1,131 +1,87 @@
-# SnowPad Darwin Architecture & Specification
+# Darwin Architecture Specification: SnowPad OS
 
-Technical specification and implementation reference for running pure Apple Darwin (XNU 1504 / macOS Snow Leopard 10.6.8 base) with the iOS 3.2 SpringBoard userland on Intel Atom N450 hardware.
+## Abstract
 
----
+This document outlines the architectural implementation of **SnowPad OS**, a bare-metal deployment of the Apple Darwin operating system (macOS Snow Leopard 10.6.8 / XNU 1504 base) on the Itautec Infoway W7020 netbook powered by an Intel Atom N450 processor. 
 
-## 1. Hardware Platform
-
-* **Target Device**: Itautec Infoway W7020 Netbook
-* **Processor**: Intel Atom N450 (Pineview-M, 45nm)
-  * Cores / Threads: 1 Core / 2 Threads (HyperThreading enabled)
-  * Clock Speed: 1.66 GHz (Bus Ratio: 10, FSB: 667 MHz)
-  * Instruction Sets: x86 (IA-32), Intel 64 (EM64T), MMX, SSE, SSE2, SSE3, SSSE3
-* **System Memory**: 2048 MB DDR2 667 MHz SODIMM
-* **Chipset**: Intel NM10 Express Chipset (ICH8M LPC interface)
-* **Graphics**: Intel GMA 3150 (Pineview Integrated Graphics Controller)
-  * Vendor ID: `0x8086`, Device ID: `0xa011` / `0xa012`
-  * Framebuffer Output: 1024x600 (LVDS internal panel) / 1360x768 @ 60 Hz (external VGA to LG TV)
-* **Audio**: Realtek ALC663 High Definition Audio Codec (HDA)
-* **Storage**: 320 GB 2.5-inch SATA Internal Hard Disk (`/dev/sda`)
-* **Network**:
-  * Ethernet: Realtek RTL8102E / RTL8103E 10/100 Mbps PCI-E
-  * Wireless: Realtek RTL8192SE / RTL8191SE 802.11b/g/n PCIe Half-Mini Card (`0x10ec:0x8172`)
-* **Input**:
-  * Built-in PS/2 Keyboard and Synaptics PS/2 Touchpad
-  * External Microntek USB Joystick / Gamepad (6 Axes, 12 Buttons)
+The internal storage architecture is 100% dedicated to Apple Darwin (HFS+ Journaled), completely eliminating secondary host operating systems from the internal SATA drive. System rescue and network deployment capabilities are delegated to an external USB flash medium.
 
 ---
 
-## 2. Disk Layout and Filesystem Structure
+## 1. Storage Architecture and Partitioning
 
-The internal 320 GB hard drive is partitioned with a standard Master Boot Record (MBR) table:
+The internal 320 GB SATA drive (`/dev/sda`) uses a Master Boot Record (MBR) partition table with a single active primary partition:
 
 ```text
 Disk /dev/sda: 320 GB (625,142,448 sectors)
-
-Device     Boot  Start Sector  End Sector  Size   Type   Filesystem
-/dev/sda1  *            2048   587202559   279 GB  0xAF   Apple HFS+ (Journaled)
-/dev/sda2          587202560   625142447    18 GB  0x83   Linux ext4 (Recovery/Hub)
++-------------------------------------------------------------+
+| Sector 0: MBR (GRUB Stage 1 + Core Embedded Image)          |
++-------------------------------------------------------------+
+| Sectors 1 - 2047: Reserved Gap                              |
++-------------------------------------------------------------+
+| /dev/sda1 (Sectors 2048 - 587202559, 279 GB):               |
+| File System: Apple HFS+ (Journaled, Case-Preserving)        |
+| Partition Type: 0xAF (Apple HFS/HFS+)                       |
+| Flags: Bootable (Active, 0x80)                              |
++-------------------------------------------------------------+
+| Sectors 587202560 - 625142447: Unallocated / Free Space     |
++-------------------------------------------------------------+
 ```
 
-### Darwin Root Partition Hierarchy (`/dev/sda1`)
+### 1.1 Filesystem Hierarchy on `/dev/sda1`
 
 ```text
 /
-├── mach_kernel                # Nawcom Legacy Atom Kernel (Universal i386/x86_64, 12.4 MB)
-├── legacy_kernel              # Secondary kernel fallback
-├── boot                       # Chameleon bootloader binary (Enoch revision)
-├── Extra/
-│   ├── DSDT.aml               # Native DSDT with HPET, RTC, and LPC patches
-│   ├── smbios.plist           # System model definition (MacBookAir3,1)
-│   ├── org.chameleon.Boot.plist # Kernel flags, graphics resolution, arch settings
-│   └── Extensions/            # Injected Darwin kernel extensions
-│       ├── FakeSMC.kext       # Apple System Management Controller emulation
-│       ├── NullCPUPowerManagement.kext # Disables AppleIntelCPUPowerManagement MSR panic
-│       ├── EvilAppleACPIPlatform.kext  # Sanitizes PC BIOS ACPI table parsing
-│       ├── EvilIOPCIFamily.kext        # Fixes PCI bus space allocation
-│       ├── SleepEnabler.kext           # Resolves power management sleep trap
-│       ├── AppleACPIPS2Nub.kext        # PS/2 controller stub
-│       ├── VoodooPS2Controller.kext    # Keyboard and touchpad driver
-│       ├── VoodooHDA.kext              # Realtek ALC663 sound engine
-│       ├── RealtekRTL8100.kext         # 10/100 Ethernet driver
-│       ├── HoRNDIS.kext                # USB smartphone tethering driver
-│       └── RTL8192se.kext              # Realtek wireless network extension
-├── sbin/
-│   └── launchd                # Mach-O PID 1 init supervisory process
-├── bin/
-│   └── sh                     # Mach-O interactive shell
-└── Applications/
-    └── SpringBoard.app/
-        └── SpringBoard        # Mach-O SpringBoard launcher binary
+|-- mach_kernel                       # Nawcom Atom-patched Universal Mach-O kernel (12.4 MB)
+|-- legacy_kernel                     # Secondary kernel entry
+|-- boot                              # Chameleon Stage 2 binary
+|-- Applications/
+|   `-- SpringBoard.app/
+|       `-- SpringBoard               # Native Mach-O 64-bit UI executable
+|-- sbin/
+|   `-- launchd                       # System initializer (PID 1)
+|-- bin/
+|   `-- sh                            # Mach-O interactive shell
+|-- usr/
+|   `-- lib/
+|       |-- dyld                      # Dynamic Linker (MH_DYLINKER, base 0x7fff5fc00000)
+|       |-- libSystem.B.dylib         # System C runtime (MH_DYLIB)
+|       `-- libSystem.dylib -> libSystem.B.dylib
+|-- Extra/
+|   |-- DSDT.aml                      # Custom ACPI tables for Pineview
+|   |-- smbios.plist                  # MacBookAir3,1 personality
+|   |-- org.chameleon.Boot.plist      # Chameleon runtime parameters
+|   `-- Extensions/                   # Kernel extensions stack
+`-- System/
+    `-- Library/
+        `-- CoreServices/
+            `-- grub/
+                |-- i386-pc/          # Embedded GRUB modules
+                `-- grub.cfg          # Native HFS+ GRUB configuration
 ```
 
 ---
 
-## 3. Kernel Architecture & Patches
+## 2. Bootloader Strategy: Dual GRUB / Chameleon Stack
 
-### The Intel Atom Pineview Constraint
+Booting Apple XNU directly on an Intel Atom processor with non-standard ACPI tables requires precise kernel initialization:
 
-The stock Apple XNU kernel (`xnu-1504.15.3` from Mac OS X 10.6.8) panics during early initialization on Intel Atom processors for three reasons:
+### 2.1 Primary Loader: Embedded GRUB with Native HFS+ Driver
 
-1. **CPUID Validation**: Apple's CPU topology detection in `osfmk/i386/cpuid.c` does not recognize the Pineview family/model (`Family 6, Model 28, Stepping 10`) and treats it as an unsupported architecture, aborting execution.
-2. **Local APIC Panic (`lapic_init`)**: The in-order execution pipeline of the Atom N450 handles timer interrupts and LAPIC register mapping differently from Core 2 Duo and Nehalem architectures, leading to a fatal `panic("lapic_init: Unknown CPU")`.
-3. **Power Management MSRs**: `AppleIntelCPUPowerManagement.kext` writes directly to Mac-specific Model-Specific Registers (`MSR_IA32_PERF_STATUS`) to manage SpeedStep. PC motherboards lack these exact registers, triggering immediate kernel panic.
-
-### The Nawcom Legacy Kernel Solution
-
-To run Darwin natively on the Atom N450, we deployed the **Nawcom Legacy Kernel v2 (Darwin 10.8.0 / XNU 1504)**:
-
-* **Format**: Universal Mach-O Fat Binary (`0xCAFEBABE`) containing both `i386` and `x86_64` code slices.
-* **Patches Applied**:
-  * Emulates Core 2 Duo CPUID flags for the scheduler and Mach thread subsystem.
-  * Adjusts `tsc_init` calculation for the 667 MHz FSB.
-  * Disables panic traps on unsupported MSR writes.
-  * Allows execution with `arch=i386` (32-bit kernel mode) or `arch=x86_64` (64-bit kernel mode).
-
----
-
-## 4. Bootloader Configuration
-
-### Chameleon Boot Parameters (`/Extra/org.chameleon.Boot.plist`)
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Kernel</key>
-    <string>mach_kernel</string>
-    <key>Kernel Flags</key>
-    <string>arch=i386 cpus=1 busratio=10 -v video=VGA-1:1360x768@60</string>
-    <key>GraphicsMode</key>
-    <string>1360x768x32@60</string>
-    <key>GraphicsEnabler</key>
-    <string>Yes</string>
-    <key>UseKernelCache</key>
-    <string>No</string>
-    <key>Timeout</key>
-    <string>3</string>
-</dict>
-</plist>
-```
-
-### GRUB Direct XNU Configuration (`/boot/grub/grub.cfg`)
-
-GRUB contains native `xnu.mod` and `hfsplus.mod` modules capable of reading HFS+ and loading XNU kernels directly:
+GRUB is installed in the MBR of `/dev/sda` with `part_msdos`, `hfsplus`, and `xnu` modules compiled into the MBR core image. The root directory is resolved dynamically on `(hd0,msdos1)`:
 
 ```grub
+# /System/Library/CoreServices/grub/grub.cfg
+set default="0"
+set timeout=3
+
+load_video
+insmod all_video
+insmod gfxterm
+insmod part_msdos
+insmod hfsplus
+insmod xnu
+
 menuentry 'SnowPad Darwin (Apple XNU Kernel no /dev/sda1)' --class osx --class darwin {
     insmod part_msdos
     insmod hfsplus
@@ -137,38 +93,85 @@ menuentry 'SnowPad Darwin (Apple XNU Kernel no /dev/sda1)' --class osx --class d
         xnu_kextdir /Extra/Extensions
     fi
 }
+
+menuentry 'Chameleon Bootloader (Mac OS X no /dev/sda1)' --class apple --class osx {
+    insmod part_msdos
+    insmod hfsplus
+    set root=(hd0,msdos1)
+    chainloader /boot
+}
 ```
+
+### 2.2 Secondary Loader: Chameleon v2.2
+
+Located at `/boot`, Chameleon provides DSDT patching, SMBIOS injection, and legacy BIOS handoff:
+
+- **SMBIOS**: MacBookAir3,1 profile (matching low-voltage single-core x86 architectures).
+- **VBIOS Patching**: Forces display resolution `1360x768x32` on Intel GMA 3150.
+- **DSDT**: Overrides HPET, RTC, and PIC routing to prevent Darwin boot panics.
 
 ---
 
-## 5. Mach-O Userland Toolchain & Compilation
+## 3. Kernel Configuration and Driver Stack
 
-All binaries running under Darwin are built using LLVM Clang 17 targeting Darwin, linked with `ld64.lld`, and signed with `ldid`:
+Apple XNU kernel `xnu-1504` (Darwin 10.8.0 Nawcom legacy build) contains CPUID and Local APIC overrides for the Intel Atom N450:
 
-### Compilation Flags
-
-```bash
-CLANG=/opt/swift/usr/bin/clang
-SDK=/opt/ios-sdk/darwin.xtoolsdk/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk
-LD=/opt/ios-sdk/darwin.xtoolsdk/toolset/bin/ld64.lld
-LDID=/opt/ldid-src/ldid
-
-# Compile Mach-O 64-bit binary
-$CLANG -target x86_64-apple-darwin \
-  -Wl,-platform_version,macos,10.15,11.0 \
-  --sysroot=$SDK \
-  -fuse-ld=$LD \
-  source.c -o output_binary
-
-# Apply Apple entitlements and ad-hoc code signature
-$LDID -S output_binary
+```text
+CPUID Family: 0x06 | Model: 0x1C | Stepping: 0x0A (Pineview)
+Native Darwin CPU Check: Intercepted via commpage patching
+Local APIC Timer: Calibrated against HPET @ 14.318 MHz
 ```
 
-### PID 1 Supervisory Contract (`/sbin/launchd`)
+### 3.1 Kernel Extensions Matrix (`/Extra/Extensions/`)
 
-When XNU finishes initializing device drivers, it transfers execution to `/sbin/launchd`. The process contract requires:
+| Kext Identifier | Version | Function |
+|---|---|---|
+| `FakeSMC.kext` | 6.26 | Intercepts SMC I/O space calls (`0x300` - `0x31F`) |
+| `NullCPUPowerManagement.kext` | 1.0.0d2 | Disables AppleIntelCPUPowerManagement MSR validation |
+| `EvilAppleACPIPlatform.kext` | 1.3.6 | Patched ACPI parser ignoring unsupported Atom S-states |
+| `EvilIOPCIFamily.kext` | 2.6 | PCI host bridge enumeration for Pineview NM10 chipset |
+| `SleepEnabler.kext` | 1.0.0 | Hooks power management sleep state triggers |
+| `VoodooPS2Controller.kext` | 1.9.2 | Synaptics trackpad and PS/2 keyboard interface |
+| `AppleACPIPS2Nub.kext` | 1.0.0 | Links ACPI keyboard device nub to PS/2 controller |
+| `VoodooHDA.kext` | 2.9.2 | High Definition Audio driver for Realtek ALC272 |
+| `HoRNDIS.kext` | 9.2 | USB Tethering network driver for Android and iOS devices |
 
-1. Binding standard descriptors `0`, `1`, `2` to `/dev/console`.
-2. Intercepting `SIGCHLD` to reap terminated child processes (`waitpid`).
-3. Spawning the primary userland interface (`/Applications/SpringBoard.app/SpringBoard`).
-4. Maintaining a persistent supervisory loop to ensure system stability.
+---
+
+## 4. Userland Contract and Mach-O Runtime
+
+Mach-O executables compiled under modern Clang/LLVM require dynamic runtime loading via the Apple dynamic linker:
+
+### 4.1 The Dynamic Linker (`/usr/lib/dyld`)
+
+- **Format**: Mach-O 64-bit `MH_DYLINKER` (type `0x07`).
+- **Load Address**: Base address fixed at `0x7fff5fc00000`.
+- **Source**: Compiled directly from Apple Open Source `dyld-132.13`.
+- **Subsystem**: Implements freestanding Mach traps (`task_self_trap`, `vm_allocate`) and BSD system calls (`mmap`, `open`, `read`, `stat64`).
+
+### 4.2 System Library (`/usr/lib/libSystem.B.dylib`)
+
+- **Format**: Mach-O 64-bit shared library (`MH_DYLIB`).
+- **Compatibility**: Exposes the standard Darwin C runtime ABI (`fork`, `execve`, `dup2`, `signal`, `printf`, `malloc`, `time`, etc.).
+- **ABI Compliance**: Provides `_NXArgc`, `_NXArgv`, `_environ`, and `_mach_init_routine` pointers expected by the Darwin `crt1.o` runtime startup.
+
+### 4.3 Process Initialization Flow
+
+```text
+[XNU Kernel]
+   |
+   +--> execve("/sbin/launchd")
+           |
+           +--> Inspects Mach-O Header (LC_LOAD_DYLINKER)
+           |       Loads /usr/lib/dyld at 0x7fff5fc00000
+           |       Jumps to __dyld_start
+           |
+           +--> [dyld]
+                   Loads /usr/lib/libSystem.B.dylib
+                   Binds symbol imports and relocations
+                   Jumps to launchd:main()
+                   |
+                   +--> [launchd (PID 1)]
+                           Opens /dev/console
+                           Spawns /Applications/SpringBoard.app/SpringBoard
+```
