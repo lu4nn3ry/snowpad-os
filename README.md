@@ -121,6 +121,7 @@ snowpad-os/
 |       `-- VoodooPS2Controller.kext
 |-- docs/
 |   |-- DARWIN_ARCHITECTURE.md
-|   `-- COMPILATION_AND_DEPLOYMENT.md
+|   |-- COMPILATION_AND_DEPLOYMENT.md
+|   `-- STANDALONE_SSH_AND_NETWORKING.md
 `-- README.md
 ```
