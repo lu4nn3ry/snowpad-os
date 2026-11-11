@@ -1,122 +1,114 @@
-# SnowPad OS: Compilation and Deployment Guide
+# Compilation and Deployment Guide: Pure Darwin Standalone
 
-## Abstract
-
-This guide provides instructions for cross-compiling native Apple Darwin Mach-O 64-bit binaries in a Linux / WSL environment, building `dyld` and `libSystem` directly from open source code, and deploying the system to the Intel Atom netbook.
+This guide details the procedure for building the native runtime libraries, dynamic linker, network stack, and standalone SSH server for Apple Darwin running on the Intel Atom N450 (Pineview) platform.
 
 ---
 
-## 1. Prerequisites and Toolchain Setup
+## 1. Toolchain Overview
 
-The cross-compilation environment runs on Ubuntu 24.04 (WSL 2) using Clang 17 and Apple Darwin SDKs:
-
-* **Compiler**: Clang 17 (`/opt/swift/usr/bin/clang`, `/opt/swift/usr/bin/clang++`)
-* **Mach-O Linker**: LLVM `ld64.lld` (`/opt/ios-sdk/darwin.xtoolsdk/toolset/bin/ld64.lld`)
-* **Codesigning**: `ldid` (`/opt/ldid-src/ldid`)
-* **Darwin SDK**: macOS 10.15/11.0 SDK headers (`/opt/ios-sdk/darwin.xtoolsdk/.../MacOSX.sdk`)
+The cross-compilation pipeline runs under Ubuntu WSL2:
+- **Compiler**: Clang 17 (`/opt/swift/usr/bin/clang`)
+- **Linker**: LLVM Mach-O Linker (`/opt/ios-sdk/darwin.xtoolsdk/toolset/bin/ld64.lld`)
+- **SDK**: macOS SDK headers (`/opt/ios-sdk/darwin.xtoolsdk/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk`)
+- **Code Signing**: `ldid` (`/opt/ldid-src/ldid -S`)
 
 ---
 
-## 2. Compiling the Dynamic Linker (`/usr/lib/dyld`)
+## 2. Dropbear SSH Server Compilation for Darwin x86_64
 
-`dyld` is the foundation of the Mach-O userland, loaded by XNU whenever an executable contains `LC_LOAD_DYLINKER`:
+Dropbear was selected for independent remote access due to its clean BSD socket implementation and bundled cryptography (LibTomCrypt and LibTomMath), removing dependencies on OpenSSL.
 
+### Configuration
 ```bash
-# 1. Clone Apple Open Source dyld (Snow Leopard 10.6.8 tag)
-git clone --depth 1 -b dyld-132.13 https://github.com/apple-oss-distributions/dyld.git /tmp/dyld
+cd /home/luann/snowpad_build/dropbear
 
-# 2. Compile object files
-CLANGXX="/opt/swift/usr/bin/clang++"
-CLANG="/opt/swift/usr/bin/clang"
-SDK="/opt/ios-sdk/darwin.xtoolsdk/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk"
-COMMON_FLAGS="-target x86_64-apple-darwin -isysroot $SDK -I/tmp/dyld/include -I/tmp/dyld/src -I/tmp/dyld/launch-cache -Wno-register -Wno-deprecated-declarations -Wno-vla-cxx-extension -O2"
+export CC="/opt/swift/usr/bin/clang -target x86_64-apple-darwin \
+  -isysroot /opt/ios-sdk/darwin.xtoolsdk/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk \
+  -fuse-ld=/opt/ios-sdk/darwin.xtoolsdk/toolset/bin/ld64.lld \
+  -Wl,-platform_version,macos,10.13,10.13"
 
-mkdir -p /tmp/dyld/build_objs
-$CLANG -target x86_64-apple-darwin -isysroot "$SDK" -c /tmp/dyld/src/dyldStartup.s -o /tmp/dyld/build_objs/dyldStartup.o
-$CLANGXX $COMMON_FLAGS -c /tmp/dyld/src/dyldInitialization.cpp -o /tmp/dyld/build_objs/dyldInitialization.o
-$CLANGXX $COMMON_FLAGS -c /tmp/dyld/src/dyld.cpp -o /tmp/dyld/build_objs/dyld.o
-$CLANGXX $COMMON_FLAGS -c /tmp/dyld/src/dyldAPIs.cpp -o /tmp/dyld/build_objs/dyldAPIs.o
-$CLANG $COMMON_FLAGS -c /tmp/dyld/src/dyldExceptions.c -o /tmp/dyld/build_objs/dyldExceptions.o
-$CLANGXX $COMMON_FLAGS -c /tmp/dyld/src/dyld_gdb.cpp -o /tmp/dyld/build_objs/dyld_gdb.o
-$CLANG $COMMON_FLAGS -c /tmp/dyld/src/glue.c -o /tmp/dyld/build_objs/glue.o
-$CLANGXX $COMMON_FLAGS -c /tmp/dyld/src/ImageLoader.cpp -o /tmp/dyld/build_objs/ImageLoader.o
-$CLANGXX $COMMON_FLAGS -c /tmp/dyld/src/ImageLoaderMachO.cpp -o /tmp/dyld/build_objs/ImageLoaderMachO.o
-$CLANGXX $COMMON_FLAGS -c /tmp/dyld/src/ImageLoaderMachOClassic.cpp -o /tmp/dyld/build_objs/ImageLoaderMachOClassic.o
-$CLANGXX $COMMON_FLAGS -c /tmp/dyld/src/ImageLoaderMachOCompressed.cpp -o /tmp/dyld/build_objs/ImageLoaderMachOCompressed.o
-$CLANG -target x86_64-apple-darwin -isysroot "$SDK" -c /tmp/dyld/src/stub_binding_helper.s -o /tmp/dyld/build_objs/stub_binding_helper.o
-$CLANGXX $COMMON_FLAGS -c /tmp/dyld/src/dyldNew.cpp -o /tmp/dyld/build_objs/dyldNew.o
-$CLANG -target x86_64-apple-darwin -isysroot "$SDK" -c /tmp/dyld/src/dyld_stub_binder.s -o /tmp/dyld/build_objs/dyld_stub_binder.o
+cat << 'EOF' > localoptions.h
+#define DROPBEAR_SVR_DROP_PRIVS 0
+#define DROPBEAR_SVR_MULTIUSER 0
+#define DROPBEAR_X11FWD 0
+#define DROPBEAR_UTMP 0
+#define DROPBEAR_WTMP 0
+EOF
+cp localoptions.h src/localoptions.h
 
-# 3. Compile support stubs (direct Darwin syscalls)
-$CLANG -target x86_64-apple-darwin -isysroot "$SDK" -c /tmp/dyld_support.c -o /tmp/dyld/build_objs/dyld_support.o
-$CLANGXX -target x86_64-apple-darwin -isysroot "$SDK" -I/tmp/dyld/include -I/tmp/dyld/src -Wno-c++11-narrowing -c /tmp/dyld/dyld_stubs.cpp -o /tmp/dyld/build_objs/dyld_stubs.o
-
-# 4. Link dyld
-LD64="/opt/ios-sdk/darwin.xtoolsdk/toolset/bin/ld64.lld"
-$LD64 -arch x86_64 -platform_version macos 10.15 11.0 -syslibroot "$SDK" \
-    -e __dyld_start /tmp/dyld/build_objs/*.o -o /tmp/dyld/dyld_linked
-
-# 5. Patch Mach-O filetype to 0x07 (MH_DYLINKER) and sign
-python3 -c '
-with open("/tmp/dyld/dyld_linked", "r+b") as f:
-    f.seek(12)
-    f.write(bytes([7, 0, 0, 0]))
-'
-/opt/ldid-src/ldid -S /tmp/dyld/dyld_linked
+./configure --host=x86_64-apple-darwin \
+  --disable-zlib \
+  --disable-pam \
+  --disable-lastlog \
+  --disable-utmp \
+  --disable-utmpx \
+  --disable-wtmp \
+  --disable-wtmpx \
+  --disable-loginfunc
 ```
 
----
-
-## 3. Compiling the System Runtime (`/usr/lib/libSystem.B.dylib`)
-
-`libSystem.B.dylib` provides the POSIX lifecycle and C standard library implementation over native XNU system calls:
-
+### Build and Sign
 ```bash
-$CLANG -target x86_64-apple-darwin -dynamiclib \
-    -install_name /usr/lib/libSystem.B.dylib \
-    -Wl,-platform_version,macos,10.15,11.0 \
-    --sysroot=$SDK -fuse-ld=$LD \
-    /tmp/libSystem_pure.c -o /tmp/libSystem.B.dylib
-
-/opt/ldid-src/ldid -S /tmp/libSystem.B.dylib
+make dropbear dropbearkey
+/opt/ldid-src/ldid -S dropbear
+/opt/ldid-src/ldid -S dropbearkey
 ```
+
+Resulting binaries:
+- `dropbear`: Mach-O 64-bit x86_64 executable (282 KB)
+- `dropbearkey`: Mach-O 64-bit x86_64 executable (139 KB)
+- Linked strictly against `/usr/lib/libSystem.B.dylib`.
 
 ---
 
-## 4. Compiling the Userland Binaries
+## 3. Dedicated Network Stack Initializer (`netsetup`)
 
+Because standard modern `ifconfig` contains modern packet-scheduler dependencies (`net/pktsched`), a focused BSD socket initializer was implemented in C (`netsetup.c`).
+
+### Compilation
 ```bash
-# 1. Compile launchd (PID 1)
-$CLANG -target x86_64-apple-darwin -Wl,-platform_version,macos,10.15,11.0 \
-    --sysroot=$SDK -fuse-ld=$LD launchd.c -o launchd
-$LDID -S launchd
+/opt/swift/usr/bin/clang -target x86_64-apple-darwin \
+  -isysroot /opt/ios-sdk/darwin.xtoolsdk/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk \
+  -fuse-ld=/opt/ios-sdk/darwin.xtoolsdk/toolset/bin/ld64.lld \
+  -Wl,-platform_version,macos,10.13,10.13 \
+  netsetup.c -o /tmp/netsetup
 
-# 2. Compile SpringBoard UI
-$CLANG -target x86_64-apple-darwin -Wl,-platform_version,macos,10.15,11.0 \
-    --sysroot=$SDK -fuse-ld=$LD springboard_macho.c -o SpringBoard
-$LDID -S SpringBoard
+/opt/ldid-src/ldid -S /tmp/netsetup
 ```
+
+### Execution at Boot
+When `/sbin/launchd` executes as PID 1:
+1. Loops through `lo0`, `en0`, and `en1`.
+2. Activates interface flags (`IFF_UP | IFF_RUNNING`).
+3. Sets static IP addresses (`192.168.0.70` for `en0` Ethernet, `192.168.0.71` for `en1` USB Tethering).
+4. Generates `/etc/resolv.conf`.
+5. Starts `/usr/sbin/dropbear -R -B -p 22 -E &`.
 
 ---
 
-## 5. Deployment Over SSH
+## 4. Hardware Driver Injection Matrix
 
-When booted into the Alpine Linux maintenance medium:
+The `/Extra/Extensions/` directory on `/dev/sda1` contains all hardware kexts:
 
-```bash
-# 1. Copy runtime libraries
-scp dyld root@192.168.0.27:/mnt/snowpad/usr/lib/dyld
-scp libSystem.B.dylib root@192.168.0.27:/mnt/snowpad/usr/lib/libSystem.B.dylib
+| KEXT Name | Purpose | Target Hardware |
+|---|---|---|
+| `AtherosL1cEthernet.kext` | Fast Ethernet Driver | Qualcomm Atheros AR8132 (`1969:1062`) |
+| `HoRNDIS.kext` | USB Tethering Driver | Android / iPhone USB Tethering |
+| `FakeSMC.kext` | Apple SMC Emulation | Universal x86 PC |
+| `NullCPUPowerManagement.kext` | Disable Intel MSR panic | Intel Atom N450 Pineview |
+| `EvilAppleACPIPlatform.kext` | ACPI Bus Enumeration | Intel NM10 Express Chipset |
+| `EvilIOPCIFamily.kext` | PCI Subsystem Driver | Intel NM10 Express Chipset |
+| `VoodooHDA.kext` | High Definition Audio | Realtek ALC272 HDA |
+| `VoodooPS2Controller.kext` | Keyboard & Trackpad | Synaptics PS/2 Port |
+| `SleepEnabler.kext` | Sleep/Wake support | Intel Atom Pineview |
 
-# 2. Deploy userland
-scp launchd root@192.168.0.27:/mnt/snowpad/sbin/launchd
-scp SpringBoard root@192.168.0.27:/mnt/snowpad/Applications/SpringBoard.app/SpringBoard
+---
 
-# 3. Set root ownership and execution permissions
-ssh root@192.168.0.27 '
-chown -R 0:0 /mnt/snowpad/usr /mnt/snowpad/sbin /mnt/snowpad/Applications
-chmod 755 /mnt/snowpad/usr/lib/dyld /mnt/snowpad/usr/lib/libSystem.B.dylib
-chmod 755 /mnt/snowpad/sbin/launchd /mnt/snowpad/Applications/SpringBoard.app/SpringBoard
-sync
-'
-```
+## 5. Standalone Bootloader Configuration
+
+The GRUB bootloader is embedded into MBR sector 0 of `/dev/sda` and reads its configuration from `(hd0,msdos1)/System/Library/CoreServices/grub/grub.cfg`.
+
+Menu entries provided:
+1. `SnowPad Darwin 64-bit (Apple XNU no /dev/sda1)`: Boots `mach_kernel` in native 64-bit mode.
+2. `SnowPad Darwin 32-bit (Apple XNU i386 no /dev/sda1)`: Boots `mach_kernel` with `arch=i386`.
+3. `Chameleon Bootloader (Mac OS X no /dev/sda1)`: Chainloads `/boot` on `/dev/sda1`.

@@ -24,13 +24,17 @@ The system drives an external LG TV monitor via VGA at native 1360x768 @ 60 Hz o
 |                     DYNAMIC RUNTIME LAYER                   |
 |  /usr/lib/dyld (Apple Open Source dyld-132.13, MH_DYLINKER) |
 |  /usr/lib/libSystem.B.dylib (Mach-O direct XNU syscalls)    |
+|  PureDarwin System.framework, IOKit.framework, libc         |
 +-------------------------------------------------------------+
 |                 SYSTEM INITIALIZATION (PID 1)               |
-|  /sbin/launchd Mach-O supervisory daemon                    |
-|  Signal handling, process management, /dev/console routing  |
+|  /sbin/launchd Mach-O supervisory script                    |
+|  /sbin/netsetup network interface & routing initializer     |
+|  /usr/sbin/dropbear native Darwin SSH daemon on port 22     |
 +-------------------------------------------------------------+
 |               KERNEL & DRIVERS (Apple Darwin / XNU)         |
 |  Nawcom Legacy Atom Kernel (xnu-1504 / Darwin 10.8.0)       |
+|  Atheros AR8132 Ethernet (AtherosL1cEthernet.kext)         |
+|  Smartphone USB Tethering (HoRNDIS.kext)                   |
 |  Essential Kernel Extensions stack (/Extra/Extensions)      |
 +-------------------------------------------------------------+
 |                     STORAGE & BOOTSTRAP                     |
@@ -51,7 +55,8 @@ The system drives an external LG TV monitor via VGA at native 1360x768 @ 60 Hz o
 | **Storage** | 320 GB Internal SATA HDD | Dedicated Partition `/dev/sda1` (279 GB Apple HFS+) |
 | **Audio** | Realtek ALC272 HDA | `VoodooHDA.kext` / `AppleALC.kext` |
 | **Network (Tethering)** | Android / iPhone USB Tethering | `HoRNDIS.kext` (Instant Wi-Fi / 4G / 5G gateway) |
-| **Ethernet** | Qualcomm Atheros AR8132 Fast Ethernet | `AtherosL1cEthernet` (`1969:1062`) |
+| **Ethernet** | Qualcomm Atheros AR8132 Fast Ethernet | `AtherosL1cEthernet.kext` (`1969:1062`) |
+| **Wireless LAN** | Realtek RTL8192SE / RTL8191SE PCIe | No native PCIe kext; routed via AR8132 or HoRNDIS |
 | **Keyboard / Trackpad** | Synaptics PS/2 Touchpad + Matrix Keyb | `VoodooPS2Controller.kext` + `AppleACPIPS2Nub.kext` |
 | **Power Management** | ACPI / HPET Override | `NullCPUPowerManagement.kext` + `SleepEnabler.kext` |
 | **ACPI / PCI Trees** | Pineview ACPI DSDT Tables | `EvilAppleACPIPlatform.kext` + `EvilIOPCIFamily.kext` |
@@ -74,34 +79,48 @@ The system drives an external LG TV monitor via VGA at native 1360x768 @ 60 Hz o
 
 ---
 
-## Dynamic Linker and System Runtime Compilation
+## Standalone Darwin SSH Server and Network Stack
 
-The Darwin userland executes native Mach-O 64-bit binaries dynamically linked against:
-- `/usr/lib/dyld` (Dynamic Linker, Mach-O type `MH_DYLINKER` `0x07`, base `0x7fff5fc00000`).
-- `/usr/lib/libSystem.B.dylib` (System C Runtime, Mach-O type `MH_DYLIB`).
+Darwin on `/dev/sda1` operates independently with its own native SSH daemon and network configuration:
 
-Both components were compiled directly from open-source code using Clang 17 and `ld64.lld` with `MacOSX.sdk`:
-- `dyld`: Built from `apple-oss-distributions/dyld` (tag `dyld-132.13`), with freestanding Darwin syscall and Mach trap stubs.
-- `libSystem`: Built from freestanding Darwin system call bridges implementing POSIX lifecycle, file descriptors, memory management, signals, and formatting routines.
+1. **Network Initialization (`/sbin/netsetup`)**:
+   - Native Mach-O 64-bit utility compiled from C using standard BSD socket ioctls (`SIOCSIFFLAGS`, `SIOCSIFADDR`, `SIOCSIFNETMASK`).
+   - Automatically initializes `lo0` (127.0.0.1) and brings up physical network adapters:
+     - `en0` (Atheros AR8132 Fast Ethernet) configured at `192.168.0.70/24`.
+     - `en1` (HoRNDIS Smartphone USB Tethering) configured at `192.168.0.71/24`.
+   - Populates `/etc/resolv.conf` with primary DNS nameservers (`192.168.0.1`, `1.1.1.1`, `8.8.8.8`).
+
+2. **Native Darwin Dropbear SSH Daemon (`/usr/sbin/dropbear`)**:
+   - Compiled from open-source Dropbear source code using `clang-17` and `ld64.lld` targeted for `x86_64-apple-darwin`.
+   - Linked directly to `/usr/lib/libSystem.B.dylib` with zero external dependencies (no PAM, no external OpenSSL).
+   - Generates host keys automatically into `/etc/dropbear/`.
+   - Pre-configured with authorized ED25519 public keys in `/var/root/.ssh/authorized_keys`.
+   - Accessible on the local network via `ssh root@192.168.0.70`.
 
 ---
 
-## Documentation
+## Repository Structure
 
-Detailed technical documentation and development guides:
-
-* [Darwin Architecture Specification](docs/DARWIN_ARCHITECTURE.md): Deep dive into CPUID patches, LAPIC fixes, kernel extensions, MBR partitioning, and memory layout.
-* [Compilation and Deployment Guide](docs/COMPILATION_AND_DEPLOYMENT.md): Step-by-step instructions for cross-compiling Mach-O binaries in WSL using `xtool` and Clang 17, and deploying over SSH.
-
----
-
-## Boot Workflow
-
-When the netbook powers on without the USB drive inserted:
-
-1. BIOS executes MBR code on `/dev/sda`.
-2. GRUB core initializes with embedded `hfsplus` filesystem driver.
-3. Configuration loaded directly from `(hd0,msdos1)/System/Library/CoreServices/grub/grub.cfg`.
-4. Option 1 (Default): Apple XNU Mach-O kernel loaded (`/mach_kernel`), injecting `/Extra/Extensions/`.
-5. Kernel launches PID 1 (`/sbin/launchd`).
-6. `launchd` invokes `/Applications/SpringBoard.app/SpringBoard` on `/dev/console` and displays on the LG TV via VGA at 1360x768 @ 60 Hz.
+```text
+snowpad-os/
+|-- Applications/
+|   `-- SpringBoard.app/
+|       |-- SpringBoard (Mach-O 64-bit executable)
+|       `-- Info.plist
+|-- Extra/
+|   |-- DSDT.aml (Pineview ACPI table)
+|   |-- smbios.plist (MacBookAir3,1 profile)
+|   `-- Extensions/ (KEXT driver stack)
+|       |-- AtherosL1cEthernet.kext (Atheros AR8132)
+|       |-- HoRNDIS.kext (USB Smartphone Tethering)
+|       |-- FakeSMC.kext
+|       |-- NullCPUPowerManagement.kext
+|       |-- EvilAppleACPIPlatform.kext
+|       |-- EvilIOPCIFamily.kext
+|       |-- VoodooHDA.kext
+|       `-- VoodooPS2Controller.kext
+|-- docs/
+|   |-- DARWIN_ARCHITECTURE.md
+|   `-- COMPILATION_AND_DEPLOYMENT.md
+`-- README.md
+```
