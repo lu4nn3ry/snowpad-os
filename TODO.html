@@ -1,1 +1,733 @@
--NoNewline
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SnowPad OS - macOS + iOS Fusion Dashboard</title>
+    <style>
+        :root {
+            --bg-color: #0d1117;
+            --card-bg: #161b22;
+            --card-border: #30363d;
+            --accent-cyan: #38bdf8;
+            --accent-purple: #a855f7;
+            --accent-apple: #58a6ff;
+            --accent-green: #3fb950;
+            --accent-gold: #f59e0b;
+            --text-main: #f0f6fc;
+            --text-dim: #8b949e;
+            --item-bg: #21262d;
+            --item-hover: #2b323c;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+        }
+
+        body {
+            background-color: var(--bg-color);
+            color: var(--text-main);
+            padding: 2rem 1rem;
+            line-height: 1.5;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        header {
+            background: linear-gradient(135deg, #1e1e38 0%, #0d1117 100%);
+            border: 1px solid #4338ca;
+            padding: 2.5rem 2rem;
+            border-radius: 18px;
+            margin-bottom: 2rem;
+            box-shadow: 0 12px 30px -10px rgba(0, 0, 0, 0.7);
+            position: relative;
+            overflow: hidden;
+        }
+
+        header::after {
+            content: "";
+            position: absolute;
+            top: -50%;
+            right: -10%;
+            width: 450px;
+            height: 450px;
+            background: radial-gradient(circle, rgba(168, 85, 247, 0.2) 0%, transparent 70%);
+            border-radius: 50%;
+            pointer-events: none;
+        }
+
+        .badge-chip {
+            display: inline-block;
+            background: rgba(168, 85, 247, 0.25);
+            color: #d8b4fe;
+            border: 1px solid rgba(168, 85, 247, 0.5);
+            padding: 0.35rem 0.9rem;
+            border-radius: 9999px;
+            font-size: 0.8rem;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.06em;
+            margin-bottom: 1rem;
+        }
+
+        h1 {
+            font-size: 2.4rem;
+            font-weight: 800;
+            background: linear-gradient(to right, #ffffff, #c084fc, #38bdf8);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            margin-bottom: 0.6rem;
+        }
+
+        .subtitle {
+            color: var(--text-dim);
+            font-size: 1.1rem;
+            max-width: 850px;
+            margin-bottom: 1.8rem;
+        }
+
+        .specs-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+            gap: 1rem;
+        }
+
+        .spec-card {
+            background: rgba(22, 27, 34, 0.85);
+            border: 1px solid #30363d;
+            padding: 1rem 1.2rem;
+            border-radius: 12px;
+        }
+
+        .spec-title {
+            font-size: 0.75rem;
+            text-transform: uppercase;
+            color: var(--text-dim);
+            font-weight: 600;
+        }
+
+        .spec-val {
+            font-size: 1.15rem;
+            font-weight: 700;
+            color: #e0e7ff;
+            margin-top: 0.3rem;
+        }
+
+        /* Progress Card */
+        .progress-section {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            padding: 1.5rem;
+            border-radius: 14px;
+            margin-bottom: 2rem;
+        }
+
+        .progress-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.8rem;
+        }
+
+        .progress-title {
+            font-size: 1.15rem;
+            font-weight: 700;
+        }
+
+        .progress-counter {
+            font-size: 1.05rem;
+            color: var(--accent-cyan);
+            font-weight: 600;
+        }
+
+        .progress-track {
+            height: 12px;
+            background: #21262d;
+            border-radius: 9999px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .progress-bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #a855f7, #38bdf8);
+            transition: width 0.4s ease-in-out;
+            box-shadow: 0 0 14px rgba(168, 85, 247, 0.6);
+        }
+
+        /* Search Controls */
+        .controls {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 2rem;
+            flex-wrap: wrap;
+        }
+
+        .search-box {
+            flex: 1;
+            min-width: 280px;
+        }
+
+        .search-box input {
+            width: 100%;
+            padding: 0.85rem 1.2rem;
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 10px;
+            color: white;
+            font-size: 0.95rem;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+
+        .search-box input:focus {
+            border-color: var(--accent-apple);
+        }
+
+        .btn-reset {
+            background: #21262d;
+            color: #f87171;
+            border: 1px solid #30363d;
+            padding: 0.85rem 1.5rem;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: all 0.2s;
+        }
+
+        .btn-reset:hover {
+            background: #3c1e24;
+            border-color: #ef4444;
+        }
+
+        /* Phase Cards */
+        .phase-card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 14px;
+            margin-bottom: 1.5rem;
+            overflow: hidden;
+        }
+
+        .phase-header {
+            padding: 1.2rem 1.5rem;
+            background: #1c2128;
+            border-bottom: 1px solid var(--card-border);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .phase-title-group {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .phase-number {
+            width: 32px;
+            height: 32px;
+            border-radius: 8px;
+            background: var(--accent-purple);
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: 800;
+            font-size: 0.9rem;
+        }
+
+        .phase-title {
+            font-size: 1.2rem;
+            font-weight: 700;
+        }
+
+        .phase-stats {
+            font-size: 0.85rem;
+            color: var(--text-dim);
+            font-weight: 500;
+        }
+
+        .task-list {
+            padding: 1.2rem 1.5rem;
+            display: flex;
+            flex-direction: column;
+            gap: 0.9rem;
+        }
+
+        .task-item {
+            background: var(--item-bg);
+            border: 1px solid #30363d;
+            border-radius: 10px;
+            padding: 1.1rem;
+            display: flex;
+            align-items: flex-start;
+            gap: 1rem;
+            transition: all 0.2s ease;
+        }
+
+        .task-item:hover {
+            background: var(--item-hover);
+            border-color: var(--accent-apple);
+        }
+
+        .task-item.completed {
+            opacity: 0.65;
+            background: #13171e;
+        }
+
+        .task-item.completed .task-name {
+            text-decoration: line-through;
+            color: #8b949e;
+        }
+
+        .task-checkbox {
+            margin-top: 0.25rem;
+            width: 20px;
+            height: 20px;
+            cursor: pointer;
+            accent-color: var(--accent-green);
+        }
+
+        .task-content {
+            flex: 1;
+        }
+
+        .task-name-row {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+            margin-bottom: 0.35rem;
+        }
+
+        .task-name {
+            font-size: 1.05rem;
+            font-weight: 600;
+            color: #f0f6fc;
+        }
+
+        .task-tag {
+            font-size: 0.7rem;
+            padding: 0.2rem 0.5rem;
+            border-radius: 6px;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .tag-xnu { background: #58a6ff22; color: #58a6ff; border: 1px solid #58a6ff44; }
+        .tag-ios { background: #a855f722; color: #c084fc; border: 1px solid #a855f744; }
+        .tag-gpu { background: #10b98122; color: #34d399; border: 1px solid #10b98144; }
+        .tag-shim { background: #f59e0b22; color: #fbbf24; border: 1px solid #f59e0b44; }
+
+        .task-desc {
+            font-size: 0.92rem;
+            color: var(--text-dim);
+            margin-bottom: 0.5rem;
+        }
+
+        .task-tech {
+            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+            font-size: 0.8rem;
+            background: #0d1117;
+            padding: 0.4rem 0.8rem;
+            border-radius: 6px;
+            color: #38bdf8;
+            border: 1px solid #30363d;
+        }
+
+        footer {
+            text-align: center;
+            margin-top: 3rem;
+            padding: 2rem 0;
+            color: #6e7681;
+            font-size: 0.9rem;
+            border-top: 1px solid #21262d;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <span class="badge-chip">Apple Darwin / XNU Hybrid Architecture</span>
+            <h1>SnowPad OS</h1>
+            <p class="subtitle">Fusão do Kernel Darwin / macOS Snow Leopard com a Interface Touch do iPhone OS / iOS 3.2 (iPad 1) otimizada para o netbook Itautec Infoway W7020 (Intel Atom N450 / GMA 3150).</p>
+            
+            <div class="specs-grid">
+                <div class="spec-card">
+                    <div class="spec-title">Kernel Substrate</div>
+                    <div class="spec-val">Darwin 10 / XNU 1504 (x86)</div>
+                </div>
+                <div class="spec-card">
+                    <div class="spec-title">User Experience</div>
+                    <div class="spec-val">iOS 3.2 SpringBoard + UIKit</div>
+                </div>
+                <div class="spec-card">
+                    <div class="spec-title">Aceleração Gráfica</div>
+                    <div class="spec-val">Intel GMA 3150 QE/CI (macOS)</div>
+                </div>
+                <div class="spec-card">
+                    <div class="spec-title">Entrada / Interação</div>
+                    <div class="spec-val">Mouse-to-Touch GSEvent Shim</div>
+                </div>
+            </div>
+        </header>
+
+        <!-- Progress -->
+        <div class="progress-section">
+            <div class="progress-header">
+                <span class="progress-title">Progresso Geral do SnowPad OS</span>
+                <span class="progress-counter" id="progress-counter">0 / 0 tarefas (0%)</span>
+            </div>
+            <div class="progress-track">
+                <div class="progress-bar" id="progress-bar"></div>
+            </div>
+        </div>
+
+        <!-- Controls -->
+        <div class="controls">
+            <div class="search-box">
+                <input type="text" id="search-input" placeholder="🔍 Filtrar módulos, kexts, frameworks, shims...">
+            </div>
+            <button class="btn-reset" onclick="resetProgress()">Reiniciar Progresso</button>
+        </div>
+
+        <!-- Phases -->
+        <div id="phases-container">
+            <!-- Phase 1 -->
+            <div class="phase-card">
+                <div class="phase-header">
+                    <div class="phase-title-group">
+                        <div class="phase-number">1</div>
+                        <div class="phase-title">Base do Kernel Darwin / XNU para Intel Atom N450</div>
+                    </div>
+                    <div class="phase-stats" id="stats-phase-1">0/5 concluídos</div>
+                </div>
+                <div class="task-list">
+                    <div class="task-item" data-id="p1-t1">
+                        <input type="checkbox" class="task-checkbox">
+                        <div class="task-content">
+                            <div class="task-name-row">
+                                <span class="task-name">Patch de CPUID do Intel Atom (XNU 1504 / Darwin 10.8)</span>
+                                <span class="task-tag tag-xnu">XNU Kernel</span>
+                            </div>
+                            <div class="task-desc">Aplicar patch no cpuid.c do XNU para reconhecer o Family 6, Model 28 (Pineview N450) como processador suportado sem disparar Kernel Panic de CPU não suportada.</div>
+                            <div class="task-tech">Arquivo: osfmk/i386/cpuid.c (CPUFAMILY_INTEL_ATOM / CPU_MODEL_ATOM)</div>
+                        </div>
+                    </div>
+                    <div class="task-item" data-id="p1-t2">
+                        <input type="checkbox" class="task-checkbox">
+                        <div class="task-content">
+                            <div class="task-name-row">
+                                <span class="task-name">Emulação de Instruções Faltantes & SSSE3</span>
+                                <span class="task-tag tag-xnu">XNU Kernel</span>
+                            </div>
+                            <div class="task-desc">O Atom N450 possui SSSE3 mas não suporta SSE4.1/4.2. Tratar exceções #UD (opcode inválido) para emular chamadas SSE4 se algum binário tentar usá-las.</div>
+                            <div class="task-tech">Arquivo: osfmk/i386/trap.c (Tratador T_INVALID_OPCODE)</div>
+                        </div>
+                    </div>
+                    <div class="task-item" data-id="p1-t3">
+                        <input type="checkbox" class="task-checkbox">
+                        <div class="task-content">
+                            <div class="task-name-row">
+                                <span class="task-name">Bootloader Chameleon / Enoch com MBR para Itautec W7020</span>
+                                <span class="task-tag tag-xnu">Boot</span>
+                            </div>
+                            <div class="task-desc">Configurar o bootloader Chameleon 2.x com suporte a MBR Legado, injeção de DSDT e bootflags (arch=i386 mach_kernel -v cpus=2).</div>
+                            <div class="task-tech">Config: org.chameleon.Boot.plist (GraphicsEnabler=Yes, KernelFlags=arch=i386)</div>
+                        </div>
+                    </div>
+                    <div class="task-item" data-id="p1-t4">
+                        <input type="checkbox" class="task-checkbox">
+                        <div class="task-content">
+                            <div class="task-name-row">
+                                <span class="task-name">Kexts Essenciais do Chipset Intel NM10</span>
+                                <span class="task-tag tag-xnu">Drivers</span>
+                            </div>
+                            <div class="task-desc">Integrar FakeSMC.kext, NullCPUPowerManagement.kext (ou patched AppleIntelCPUPowerManagement) e AppleACPIPlatform.kext para o NM10 Express.</div>
+                            <div class="task-tech">Diretório: /Extra/Extensions/ ou /System/Library/Extensions/</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Phase 2 -->
+            <div class="phase-card">
+                <div class="phase-header">
+                    <div class="phase-title-group">
+                        <div class="phase-number">2</div>
+                        <div class="phase-title">Subsistema Gráfico & Aceleração 3D (Intel GMA 3150)</div>
+                    </div>
+                    <div class="phase-stats" id="stats-phase-2">0/4 concluídos</div>
+                </div>
+                <div class="task-list">
+                    <div class="task-item" data-id="p2-t1">
+                        <input type="checkbox" class="task-checkbox">
+                        <div class="task-content">
+                            <div class="task-name-row">
+                                <span class="task-name">Injeção de Device ID da GMA 3150 (0x8086:0xA001)</span>
+                                <span class="task-tag tag-gpu">Gráficos</span>
+                            </div>
+                            <div class="task-desc">Adicionar o PCI ID da GMA 3150 nos Info.plist da AppleIntelGMA950.kext e AppleIntelIntegratedFramebuffer.kext de 32 bits.</div>
+                            <div class="task-tech">IOPCIPrimaryMatch: 0xa0018086 0xa0118086</div>
+                        </div>
+                    </div>
+                    <div class="task-item" data-id="p2-t2">
+                        <input type="checkbox" class="task-checkbox">
+                        <div class="task-content">
+                            <div class="task-name-row">
+                                <span class="task-name">Resolução Nativa 1024x600 do Itautec W7020</span>
+                                <span class="task-tag tag-gpu">Gráficos</span>
+                            </div>
+                            <div class="task-desc">Configurar o VideoBios / VESA EDID injection para que o display LVDS de 10.1 polegadas opere na resolução exata de 1024x600 sem distorção.</div>
+                            <div class="task-tech">Chameleon Flag: "Graphics Mode"="1024x600x32"</div>
+                        </div>
+                    </div>
+                    <div class="task-item" data-id="p2-t3">
+                        <input type="checkbox" class="task-checkbox">
+                        <div class="task-content">
+                            <div class="task-name-row">
+                                <span class="task-name">Habilitação de Quartz Extreme & Core Image (QE/CI)</span>
+                                <span class="task-tag tag-gpu">Gráficos</span>
+                            </div>
+                            <div class="task-desc">Garantir aceleração via hardware no WindowServer para que animações do SpringBoard (zoom de ícones, rotação, páginas) rodem com aceleração OpenGL.</div>
+                            <div class="task-tech">Framework: OpenGL.framework + CoreGraphics (32-bit i386)</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Phase 3 -->
+            <div class="phase-card">
+                <div class="phase-header">
+                    <div class="phase-title-group">
+                        <div class="phase-number">3</div>
+                        <div class="phase-title">Extração da Userland do iPhone OS / iOS 3.2 (iPad 1)</div>
+                    </div>
+                    <div class="phase-stats" id="stats-phase-3">0/5 concluídos</div>
+                </div>
+                <div class="task-list">
+                    <div class="task-item" data-id="p3-t1">
+                        <input type="checkbox" class="task-checkbox">
+                        <div class="task-content">
+                            <div class="task-name-row">
+                                <span class="task-name">Extração do SpringBoard.app & Frameworks do iPhoneSimulator 3.2</span>
+                                <span class="task-tag tag-ios">iOS Userland</span>
+                            </div>
+                            <div class="task-desc">Extrair os binários i386 Mach-O do SpringBoard, UIKit.framework, GraphicsServices, MobileCoreServices e CoreFoundation do SDK oficial do iPad 1.</div>
+                            <div class="task-tech">Origem: iPhoneSimulator3.2.sdk (Binários nativos i386 Mach-O)</div>
+                        </div>
+                    </div>
+                    <div class="task-item" data-id="p3-t2">
+                        <input type="checkbox" class="task-checkbox">
+                        <div class="task-content">
+                            <div class="task-name-row">
+                                <span class="task-name">Mapeamento de Frameworks Compartilhados (/System/Library/Frameworks)</span>
+                                <span class="task-tag tag-ios">iOS Userland</span>
+                            </div>
+                            <div class="task-desc">Organizar o sistema de arquivos da raiz para que o dyld encontre as dylibs do UIKit sem entrar em conflito com as dylibs do macOS.</div>
+                            <div class="task-tech">Variáveis: DYLD_FRAMEWORK_PATH=/System/iOS/Frameworks</div>
+                        </div>
+                    </div>
+                    <div class="task-item" data-id="p3-t3">
+                        <input type="checkbox" class="task-checkbox">
+                        <div class="task-content">
+                            <div class="task-name-row">
+                                <span class="task-name">Apps Nativos do iOS 3.x Adaptados</span>
+                                <span class="task-tag tag-ios">iOS Userland</span>
+                            </div>
+                            <div class="task-desc">Instalar MobileSafari.app, Preferences.app, MobileMusicPlayer (iPod), Calculadora e Notas organizados na grade da tela inicial do SpringBoard.</div>
+                            <div class="task-tech">Diretório: /Applications/ (Bundles de apps do iOS)</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Phase 4 -->
+            <div class="phase-card">
+                <div class="phase-header">
+                    <div class="phase-title-group">
+                        <div class="phase-number">4</div>
+                        <div class="phase-title">Ponte Mouse-to-Touch Shim (`touchshim`)</div>
+                    </div>
+                    <div class="phase-stats" id="stats-phase-4">0/4 concluídos</div>
+                </div>
+                <div class="task-list">
+                    <div class="task-item" data-id="p4-t1">
+                        <input type="checkbox" class="task-checkbox">
+                        <div class="task-content">
+                            <div class="task-name-row">
+                                <span class="task-name">Interceptador de Eventos IOHIDEvent (Touchpad / Mouse PS/2)</span>
+                                <span class="task-tag tag-shim">Shim</span>
+                            </div>
+                            <div class="task-desc">Capturar os movimentos e cliques do touchpad do Itautec W7020 através de um tap no subsistema de eventos do CoreGraphics/IOKit.</div>
+                            <div class="task-tech">API: CGEventTapCreate(kCGHIDEventTap, ...)</div>
+                        </div>
+                    </div>
+                    <div class="task-item" data-id="p4-t2">
+                        <input type="checkbox" class="task-checkbox">
+                        <div class="task-content">
+                            <div class="task-name-row">
+                                <span class="task-name">Tradutor GSEvent (GraphicsServices Touch Injection)</span>
+                                <span class="task-tag tag-shim">Shim</span>
+                            </div>
+                            <div class="task-desc">Converter clique pressionado em GSEventTypeTouchesBegan, movimento com clique em GSEventTypeTouchesMoved e liberação em GSEventTypeTouchesEnded.</div>
+                            <div class="task-tech">Estruturas: GSEventRecord, GSHandInfo, GSEventPost()</div>
+                        </div>
+                    </div>
+                    <div class="task-item" data-id="p4-t3">
+                        <input type="checkbox" class="task-checkbox">
+                        <div class="task-content">
+                            <div class="task-name-row">
+                                <span class="task-name">Renderização de Cursor Suave sobre a Interface do iOS</span>
+                                <span class="task-tag tag-shim">Shim</span>
+                            </div>
+                            <div class="task-desc">Como o iOS não possui ponteiro de mouse nativo, desenhar uma camada semitransparente estilo iPadOS para visualização do clique.</div>
+                            <div class="task-tech">Overlay: CGLayer / CALayer flutuante seguindo o mouse</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Phase 5 -->
+            <div class="phase-card">
+                <div class="phase-header">
+                    <div class="phase-title-group">
+                        <div class="phase-number">5</div>
+                        <div class="phase-title">Modo Duplo & Integração macOS UNIX</div>
+                    </div>
+                    <div class="phase-stats" id="stats-phase-5">0/3 concluídos</div>
+                </div>
+                <div class="task-list">
+                    <div class="task-item" data-id="p5-t1">
+                        <input type="checkbox" class="task-checkbox">
+                        <div class="task-content">
+                            <div class="task-name-row">
+                                <span class="task-name">Hot-Key de Alternância (iOS Mode <-> macOS Terminal)</span>
+                                <span class="task-tag tag-xnu">Dual-Mode</span>
+                            </div>
+                            <div class="task-desc">Atalho de teclado (ex: Cmd+Espaço ou Fn+F1) para ocultar o SpringBoard e revelar o Terminal UNIX do macOS para desenvolvimento e testes.</div>
+                            <div class="task-tech">Daemon: snowpad_switcher (IPC via mach_msg)</div>
+                        </div>
+                    </div>
+                    <div class="task-item" data-id="p5-t2">
+                        <input type="checkbox" class="task-checkbox">
+                        <div class="task-content">
+                            <div class="task-name-row">
+                                <span class="task-name">Servidor OpenSSH & Acesso Remoto de Desenvolvimento</span>
+                                <span class="task-tag tag-xnu">Rede</span>
+                            </div>
+                            <div class="task-desc">SSH integrado ativo em segundo plano conectado na rede Wi-Fi LNET para controle pelo PC desenvolvedor.</div>
+                            <div class="task-tech">Porta 22: root@snowpad</div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <footer>
+            <p>SnowPad OS Project &copy; 2026. Feito para arquitetura Intel Atom N450 (Pineview / Bonnell) + Darwin XNU.</p>
+        </footer>
+    </div>
+
+    <script>
+        const STORAGE_KEY = 'snowpad_os_todo_state_v1';
+
+        function loadState() {
+            try {
+                const saved = localStorage.getItem(STORAGE_KEY);
+                return saved ? JSON.parse(saved) : {};
+            } catch(e) {
+                return {};
+            }
+        }
+
+        function saveState(state) {
+            try {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
+            } catch(e) {}
+        }
+
+        function updateProgress() {
+            const state = loadState();
+            const allItems = document.querySelectorAll('.task-item');
+            let completedCount = 0;
+
+            allItems.forEach(item => {
+                const id = item.getAttribute('data-id');
+                const checkbox = item.querySelector('.task-checkbox');
+                if (state[id]) {
+                    checkbox.checked = true;
+                    item.classList.add('completed');
+                    completedCount++;
+                } else {
+                    checkbox.checked = false;
+                    item.classList.remove('completed');
+                }
+            });
+
+            const total = allItems.length;
+            const pct = total > 0 ? Math.round((completedCount / total) * 100) : 0;
+
+            document.getElementById('progress-bar').style.width = pct + '%';
+            document.getElementById('progress-counter').textContent = `${completedCount} / ${total} tarefas (${pct}%)`;
+
+            document.querySelectorAll('.phase-card').forEach((card, index) => {
+                const phaseNum = index + 1;
+                const phaseItems = card.querySelectorAll('.task-item');
+                let phaseDone = 0;
+                phaseItems.forEach(it => {
+                    const id = it.getAttribute('data-id');
+                    if (state[id]) phaseDone++;
+                });
+                const statElem = document.getElementById(`stats-phase-${phaseNum}`);
+                if (statElem) {
+                    statElem.textContent = `${phaseDone}/${phaseItems.length} concluídos`;
+                }
+            });
+        }
+
+        document.addEventListener('change', (e) => {
+            if (e.target.classList.contains('task-checkbox')) {
+                const item = e.target.closest('.task-item');
+                const id = item.getAttribute('data-id');
+                const state = loadState();
+                state[id] = e.target.checked;
+                saveState(state);
+                updateProgress();
+            }
+        });
+
+        document.getElementById('search-input').addEventListener('input', (e) => {
+            const query = e.target.value.toLowerCase();
+            document.querySelectorAll('.task-item').forEach(item => {
+                const text = item.textContent.toLowerCase();
+                if (text.includes(query)) {
+                    item.style.display = 'flex';
+                } else {
+                    item.style.display = 'none';
+                }
+            });
+        });
+
+        function resetProgress() {
+            if (confirm('Deseja resetar o progresso do SnowPad OS?')) {
+                localStorage.removeItem(STORAGE_KEY);
+                updateProgress();
+            }
+        }
+
+        window.addEventListener('DOMContentLoaded', () => {
+            updateProgress();
+        });
+    </script>
+</body>
+</html>
