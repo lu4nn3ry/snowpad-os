@@ -73,13 +73,13 @@ int main(int argc, char **argv) {
     printf("======================================================\n\n");
 
     printf("[TOUCHSHIM] Initializing Mach event tap on WindowServer...\n");
-    printf("[TOUCHSHIM] Target Resolution: 1024x600 (Intel GMA 3150)\n");
+    printf("[TOUCHSHIM] Target Resolution: 1360x768 (External VGA LG TV - Intel GMA 3150)\n");
     printf("[TOUCHSHIM] Listening for mouse events...\n");
 
-    // Simulation test
-    on_mouse_down(512.0f, 300.0f);
-    on_mouse_move(512.0f, 250.0f);
-    on_mouse_up(512.0f, 250.0f);
+    // Simulation test on 1360x768 canvas
+    on_mouse_down(680.0f, 384.0f);
+    on_mouse_move(680.0f, 320.0f);
+    on_mouse_up(680.0f, 320.0f);
 
     printf("\n[TOUCHSHIM] Ready.\n");
     return 0;

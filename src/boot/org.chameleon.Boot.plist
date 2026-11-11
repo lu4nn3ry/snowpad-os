@@ -5,11 +5,15 @@
     <key>Kernel</key>
     <string>mach_kernel</string>
     <key>Kernel Flags</key>
-    <string>arch=i386 cpus=2 -v npci=0x2000</string>
+    <string>arch=i386 cpus=2 -v npci=0x2000 video=VGA-1:1360x768@60</string>
     <key>GraphicsEnabler</key>
     <string>Yes</string>
     <key>Graphics Mode</key>
-    <string>1024x600x32</string>
+    <string>1360x768x32</string>
+    <key>ScreenResolution</key>
+    <string>1360x768</string>
+    <key>VBIOS</key>
+    <string>Yes</string>
     <key>Timeout</key>
     <string>2</string>
     <key>Default Partition</key>
