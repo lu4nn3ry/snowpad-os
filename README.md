@@ -38,8 +38,8 @@ The system drives an external LG TV monitor via VGA at native 1360x768 @ 60 Hz o
 |  Essential Kernel Extensions stack (/Extra/Extensions)      |
 +-------------------------------------------------------------+
 |                     STORAGE & BOOTSTRAP                     |
-|  /dev/sda1 (279 GB Apple HFS+ Journaled, Entire Internal HDD|
-|  GRUB embedded core (hfsplus / xnu) + Chameleon Bootloader  |
+|  /dev/sda1 (279 GB Apple HFS+ Journaled, Entire Internal HDD)|
+|  Chameleon 2.0 RC4 Bootloader (MBR boot0 + PBR boot1h + /boot)|
 +-------------------------------------------------------------+
 ```
 
